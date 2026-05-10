@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from typing import TYPE_CHECKING
+
 from ... import log
 from ..base import Analyzer, Diagnostic
 from .index import (
@@ -32,7 +34,10 @@ from .index import (
     collect_scrapes,
     update_scrapes,
 )
-from .magic import ALWAYS_PRESENT, FK_LIKE_FIELD_NAMES
+from .magic import FK_LIKE_FIELD_NAMES
+
+if TYPE_CHECKING:
+    from ...config import Config
 
 
 _log = log.get("django.analyzer")
@@ -56,17 +61,28 @@ class DjangoAnalyzer:
     name = "django"
 
     def __init__(
-        self, workspace_root: Path, django_index: DjangoIndex | None = None
+        self,
+        workspace_root: Path,
+        django_index: DjangoIndex | None = None,
+        config: "Config | None" = None,
     ) -> None:
+        # Lazy import — config.py pulls in this package via magic.py and we
+        # need to break the cycle.
+        from ...config import DEFAULT as DEFAULT_CONFIG
+
         self.workspace_root = workspace_root
         self.django_index: DjangoIndex = django_index or DjangoIndex()
+        self.config: "Config" = config or DEFAULT_CONFIG
         self._cache: dict[str, _ParsedFile] = {}
         self._scrapes: dict[Path, _FileScrape] = {}
 
     # -- Analyzer protocol ----------------------------------------------------
 
     async def index(self, workspace_root: Path) -> None:
+        from ...config import load as load_config
+
         self.workspace_root = workspace_root
+        self.config = load_config(workspace_root)
         self._scrapes = collect_scrapes(workspace_root)
         self.django_index = assemble_index(workspace_root, self._scrapes)
         self._cache.clear()
@@ -81,15 +97,6 @@ class DjangoAnalyzer:
         # cached scrape map. ~milliseconds even on large workspaces.
         update_scrapes(self.workspace_root, self._scrapes, path)
         self.django_index = assemble_index(self.workspace_root, self._scrapes)
-
-    def is_false_positive(self, uri: str, diagnostic: Diagnostic) -> bool:
-        if not _is_unresolved_attribute(diagnostic):
-            return False
-        try:
-            return self._evaluate(uri, diagnostic)
-        except Exception:
-            _log.exception("analyzer crashed; keeping the diagnostic")
-            return False
 
     # -- internals ------------------------------------------------------------
 
@@ -180,16 +187,36 @@ class DjangoAnalyzer:
         return None
 
     def _attr_is_magic(self, model: ModelInfo, attr_name: str) -> bool:
-        if attr_name in ALWAYS_PRESENT:
+        cfg = self.config
+
+        for group in ("manager", "meta", "exception"):
+            if cfg.is_rule_enabled(group) and attr_name in cfg.merged_static_attrs(group):
+                return True
+
+        if cfg.is_rule_enabled("pk") and attr_name in cfg.merged_static_attrs("pk"):
             # Special-case `id`: only present implicitly when no explicit PK.
             if attr_name == "id" and not model.implicit_id:
                 return False
             return True
-        if attr_name in model.fk_id_accessors:
+
+        if cfg.is_rule_enabled("fk_id") and attr_name in model.fk_id_accessors:
             return True
-        if attr_name in self.django_index.reverse_attrs(model.qualname):
+
+        if cfg.is_rule_enabled("reverse") and attr_name in self.django_index.reverse_attrs(model.qualname):
             return True
+
         return False
+
+    def is_false_positive(self, uri: str, diagnostic: Diagnostic) -> bool:  # type: ignore[override]
+        if not self.config.enabled:
+            return False
+        if not _is_unresolved_attribute(diagnostic):
+            return False
+        try:
+            return self._evaluate(uri, diagnostic)
+        except Exception:
+            _log.exception("analyzer crashed; keeping the diagnostic")
+            return False
 
 
 # ---------------------------------------------------------------------------

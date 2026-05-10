@@ -109,6 +109,26 @@ Bias is explicitly toward false negatives — better to leak a bit of noise
 than to suppress a real bug. The index is rebuilt incrementally on
 `didChange`/`didSave` and never imports the user's code.
 
+## Per-project configuration
+
+Add a `[tool.iommi-lsp]` table to your `pyproject.toml`:
+
+```toml
+[tool.iommi-lsp]
+enabled = true                          # master switch
+disabled_rules = ["pk", "reverse"]       # skip rule groups for this project
+
+[tool.iommi-lsp.extra_magic_attrs]
+manager = ["mongo", "search"]            # treat these as Manager-like attrs
+```
+
+Recognised rule groups: `manager`, `meta`, `pk`, `exception`, `fk_id`,
+`reverse`. Unknown groups in `disabled_rules` are ignored with a stderr
+warning rather than silently breaking the filter.
+
+A missing or malformed `pyproject.toml` falls back to defaults; the
+proxy never crashes on a bad config.
+
 ## Caveats
 
 * **Pre-1.0 ty.** Diagnostic codes and message text *will* change. The
