@@ -230,6 +230,185 @@ def test_q_relation_traversal(analyzer_blog: DjangoAnalyzer, tmp_path: Path):
     assert analyzer_blog.additional_diagnostics(uri) == []
 
 
+def test_order_by_valid(analyzer_basic: DjangoAnalyzer, tmp_path: Path):
+    src = (
+        "from myapp.models import User\n"
+        "User.objects.order_by('username', '-email', 'pk')\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_basic.additional_diagnostics(uri) == []
+
+
+def test_order_by_random_token(analyzer_basic: DjangoAnalyzer, tmp_path: Path):
+    src = (
+        "from myapp.models import User\n"
+        "User.objects.order_by('?')\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_basic.additional_diagnostics(uri) == []
+
+
+def test_order_by_unknown_field_with_dash(
+    analyzer_basic: DjangoAnalyzer, tmp_path: Path
+):
+    src = (
+        "from myapp.models import User\n"
+        "User.objects.order_by('-bogus')\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_basic.additional_diagnostics(uri)
+    assert len(diags) == 1
+    d = diags[0]
+    assert d["data"]["outcome"] == "unknown_field"
+    line = src.splitlines()[d["range"]["start"]["line"]]
+    pinned = line[d["range"]["start"]["character"]:d["range"]["end"]["character"]]
+    assert pinned == "bogus"   # not "-bogus"
+
+
+def test_order_by_relation_traversal(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path
+):
+    src = (
+        "from blog.models import Article\n"
+        "Article.objects.order_by('author__name', '-author__bogus')\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_blog.additional_diagnostics(uri)
+    assert len(diags) == 1
+    assert diags[0]["data"]["on_model"] == "blog.models.Author"
+
+
+def test_values_only_defer_distinct(analyzer_basic: DjangoAnalyzer, tmp_path: Path):
+    src = (
+        "from myapp.models import User\n"
+        "User.objects.values('username').only('email').defer('bogus').distinct()\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_basic.additional_diagnostics(uri)
+    assert len(diags) == 1
+    assert "bogus" in diags[0]["message"]
+
+
+def test_values_list_with_flat_kwarg(analyzer_basic: DjangoAnalyzer, tmp_path: Path):
+    # Positional strings are field paths; `flat=True` is a kwarg, not validated.
+    src = (
+        "from myapp.models import User\n"
+        "User.objects.values_list('username', flat=True)\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_basic.additional_diagnostics(uri) == []
+
+
+def test_select_related_relation_path(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path
+):
+    src = (
+        "from blog.models import Article\n"
+        "Article.objects.select_related('author').filter(title='x')\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_blog.additional_diagnostics(uri) == []
+
+
+def test_select_related_unknown(analyzer_blog: DjangoAnalyzer, tmp_path: Path):
+    src = (
+        "from blog.models import Article\n"
+        "Article.objects.select_related('bogus')\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_blog.additional_diagnostics(uri)
+    assert len(diags) == 1
+    assert "bogus" in diags[0]["message"]
+
+
+def test_prefetch_related_reverse(analyzer_blog: DjangoAnalyzer, tmp_path: Path):
+    src = (
+        "from blog.models import Author\n"
+        "Author.objects.prefetch_related('articles')\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_blog.additional_diagnostics(uri) == []
+
+
+def test_prefetch_related_skips_non_string_args(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path
+):
+    # `Prefetch(...)` objects pass through silently.
+    src = (
+        "from django.db.models import Prefetch\n"
+        "from blog.models import Author\n"
+        "Author.objects.prefetch_related(Prefetch('articles'))\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_blog.additional_diagnostics(uri) == []
+
+
+def test_update_kwargs(analyzer_basic: DjangoAnalyzer, tmp_path: Path):
+    src = (
+        "from myapp.models import User\n"
+        "User.objects.filter(pk=1).update(username='x', bogus='y')\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_basic.additional_diagnostics(uri)
+    assert len(diags) == 1
+    assert "bogus" in diags[0]["message"]
+
+
+def test_create_kwargs(analyzer_basic: DjangoAnalyzer, tmp_path: Path):
+    src = (
+        "from myapp.models import User\n"
+        "User.objects.create(username='x', bogus=1)\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_basic.additional_diagnostics(uri)
+    assert len(diags) == 1
+    assert "bogus" in diags[0]["message"]
+
+
+def test_f_expression_valid(analyzer_basic: DjangoAnalyzer, tmp_path: Path):
+    src = (
+        "from django.db.models import F\n"
+        "from myapp.models import User\n"
+        "User.objects.update(username=F('email'))\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_basic.additional_diagnostics(uri) == []
+
+
+def test_f_expression_unknown(analyzer_basic: DjangoAnalyzer, tmp_path: Path):
+    src = (
+        "from django.db.models import F\n"
+        "from myapp.models import User\n"
+        "User.objects.update(username=F('bogus'))\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_basic.additional_diagnostics(uri)
+    assert len(diags) == 1
+    assert "bogus" in diags[0]["message"]
+
+
+def test_f_expression_relation_path(analyzer_blog: DjangoAnalyzer, tmp_path: Path):
+    src = (
+        "from django.db.models import F\n"
+        "from blog.models import Article\n"
+        "Article.objects.filter(title=F('author__name'))\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_blog.additional_diagnostics(uri) == []
+
+
+def test_f_inside_q(analyzer_blog: DjangoAnalyzer, tmp_path: Path):
+    src = (
+        "from django.db.models import F, Q\n"
+        "from blog.models import Article\n"
+        "Article.objects.filter(Q(title=F('author__bogus')))\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_blog.additional_diagnostics(uri)
+    assert len(diags) == 1
+    assert diags[0]["data"]["on_model"] == "blog.models.Author"
+
+
 def test_disabled_via_config(analyzer_basic: DjangoAnalyzer, tmp_path: Path):
     src = (
         "from myapp.models import User\n"

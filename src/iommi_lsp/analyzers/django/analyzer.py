@@ -50,9 +50,20 @@ _QUERY_METHODS_RETURNING_INSTANCE = frozenset({
 })
 
 # Manager methods that take ``field__lookup=...`` kwargs we want to validate.
-# Conservative set for v1 — these are the common, unambiguous cases.
+# ``update``/``create`` only accept single-segment field names in real
+# Django — the walker is permissive about ``__`` traversal which means
+# we'd miss e.g. ``update(author__name='x')`` (invalid Django). Bias FN.
 _LOOKUP_METHODS = frozenset({
     "filter", "exclude", "get", "get_or_create", "update_or_create",
+    "update", "create",
+})
+
+# Methods whose positional args are field-path strings (``order_by``-style).
+# Each string is a chain like ``"author__name"`` (with optional leading
+# ``-`` for ``order_by`` descending; ``"?"`` for random).
+_FIELD_PATH_METHODS = frozenset({
+    "order_by", "values", "values_list", "only", "defer", "distinct",
+    "select_related", "prefetch_related",
 })
 
 _MANAGER_NAMES = frozenset({"objects", "_default_manager", "_base_manager"})
@@ -258,18 +269,76 @@ class DjangoAnalyzer:
                 continue
             if not isinstance(node.func, ast.Attribute):
                 continue
-            if node.func.attr not in _LOOKUP_METHODS:
+            method = node.func.attr
+            if method not in _LOOKUP_METHODS and method not in _FIELD_PATH_METHODS:
                 continue
             model = self._root_manager_model(node.func.value)
             if model is None:
                 continue
-            # Validate direct kwargs: `.filter(name__icontains=…)`.
-            yield from self._validate_kwargs(parsed, model, node.keywords)
-            # Validate kwargs nested in Q(...) positional args:
-            # `.filter(Q(a=1) | Q(b=2), …)`.
-            for arg in node.args:
-                for q_kwargs in _iter_q_kwargs(arg):
-                    yield from self._validate_kwargs(parsed, model, q_kwargs)
+            if method in _LOOKUP_METHODS:
+                # `.filter(name__icontains=…)` — direct kwargs.
+                yield from self._validate_kwargs(parsed, model, node.keywords)
+                # `.filter(Q(a=1) | Q(b=2), …)` — kwargs inside Q expressions.
+                for arg in node.args:
+                    for q_kwargs in _iter_q_kwargs(arg):
+                        yield from self._validate_kwargs(parsed, model, q_kwargs)
+            if method in _FIELD_PATH_METHODS:
+                yield from self._validate_field_path_args(
+                    parsed, model, node.args, method
+                )
+            # F('field__path') anywhere in the call's args/kwargs.
+            yield from self._validate_f_calls(model, node)
+
+    def _validate_field_path_args(
+        self,
+        parsed: _ParsedFile,
+        model: ModelInfo,
+        args: list[ast.expr],
+        method: str,
+    ):
+        for arg in args:
+            if not isinstance(arg, ast.Constant) or not isinstance(arg.value, str):
+                # F() / Prefetch() / variables — skip.
+                continue
+            raw = arg.value
+            # `order_by('?')` — random ordering, not a field path.
+            if method == "order_by" and raw == "?":
+                continue
+            leading = 0
+            if method == "order_by" and raw.startswith("-"):
+                leading = 1
+            chain_str = raw[leading:]
+            if not chain_str:
+                continue
+            chain = lookup_walker.split_chain(chain_str)
+            result = lookup_walker.walk(self.django_index, model.qualname, chain)
+            if isinstance(result, lookup_walker.Problem):
+                diag = _string_problem_to_diagnostic(arg, chain, leading, result)
+                if diag is not None:
+                    yield diag
+
+    def _validate_f_calls(self, model: ModelInfo, call: ast.Call):
+        """Find F('field__path') anywhere in *call*'s arg/kwarg subtrees."""
+        seen: set[int] = set()
+        for sub in _iter_arg_subtrees(call):
+            for fnode in ast.walk(sub):
+                if not isinstance(fnode, ast.Call) or not _is_f_call(fnode):
+                    continue
+                key = id(fnode)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if not fnode.args:
+                    continue
+                arg0 = fnode.args[0]
+                if not isinstance(arg0, ast.Constant) or not isinstance(arg0.value, str):
+                    continue
+                chain = lookup_walker.split_chain(arg0.value)
+                result = lookup_walker.walk(self.django_index, model.qualname, chain)
+                if isinstance(result, lookup_walker.Problem):
+                    diag = _string_problem_to_diagnostic(arg0, chain, 0, result)
+                    if diag is not None:
+                        yield diag
 
     def _validate_kwargs(
         self,
@@ -363,6 +432,29 @@ def _find_attribute_at(tree: ast.Module, range_: dict) -> ast.Attribute | None:
     return best
 
 
+def _is_f_call(call: ast.Call) -> bool:
+    """Recognise ``F(...)`` and ``models.F(...)`` calls."""
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id == "F"
+    if isinstance(func, ast.Attribute):
+        return func.attr == "F"
+    return False
+
+
+def _iter_arg_subtrees(call: ast.Call):
+    """Yield the AST subtrees of *call*'s positional + keyword args.
+
+    Avoids the ``func`` subtree so chained-receiver calls aren't
+    re-scanned (each chained call is reached on its own ``ast.walk``).
+    """
+    for a in call.args:
+        yield a
+    for kw in call.keywords:
+        if kw.value is not None:
+            yield kw.value
+
+
 def _is_q_call(call: ast.Call) -> bool:
     """Recognise ``Q(...)`` and ``models.Q(...)`` / ``...Q(...)`` calls."""
     func = call.func
@@ -436,6 +528,37 @@ def _problem_to_diagnostic(
         seg_offset += len(seg) + len(sep)
 
     col_start = name_col + seg_offset
+    col_end = col_start + len(problem.bad_segment)
+    return _make_orm_diagnostic(
+        line0, col_start, col_end, _format_orm_message(problem), problem
+    )
+
+
+def _string_problem_to_diagnostic(
+    arg: ast.Constant,
+    chain: list[str],
+    leading: int,
+    problem: lookup_walker.Problem,
+) -> Diagnostic | None:
+    """Pin a diagnostic to the bad segment inside a string-literal field path.
+
+    *leading* is the count of source characters consumed before the chain
+    begins (e.g. ``1`` for ``order_by('-foo')`` to skip the ``-``).
+    """
+    if arg.lineno is None or arg.col_offset is None:
+        return None
+    line0 = arg.lineno - 1
+    # `arg.col_offset` points at the opening quote of the string literal.
+    # Adding 1 skips the quote; works for normal `'...'` / `"..."`.
+    # Triple-quoted or implicit-concat literals can produce slightly
+    # off offsets — we accept that as a cosmetic edge case.
+    quote_skip = 1
+    seg_offset = 0
+    for i, seg in enumerate(chain):
+        if i == problem.segment_index:
+            break
+        seg_offset += len(seg) + len("__")
+    col_start = arg.col_offset + quote_skip + leading + seg_offset
     col_end = col_start + len(problem.bad_segment)
     return _make_orm_diagnostic(
         line0, col_start, col_end, _format_orm_message(problem), problem
