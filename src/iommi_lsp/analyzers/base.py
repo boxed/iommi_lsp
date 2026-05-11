@@ -8,6 +8,7 @@ to add iommi as a second analyzer later.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -16,6 +17,25 @@ from typing import Any, Protocol, runtime_checkable
 # Using ``dict[str, Any]`` rather than the lsprotocol dataclass keeps the hot
 # path zero-copy: we only validate fields we actually inspect.
 Diagnostic = dict[str, Any]
+
+
+@dataclass
+class CompletionResult:
+    """Return type for ``Analyzer.completions(uri, position)``.
+
+    *items* are LSP ``CompletionItem`` dicts. *exclusive* tells the
+    matchmaker to drop any items the backend (``ty``) produced for the
+    same request — used when the analyzer recognises a position where
+    the backend's free-form name completions would be noise (e.g.
+    inside a ``Model.objects.filter(...)`` kwarg, where every legal
+    completion is a field name we already know).
+
+    Empty + exclusive is meaningful: "we own this position; show
+    nothing" rather than "we have no opinion, fall back to ty". Empty
+    + not-exclusive is a no-op.
+    """
+    items: list[dict] = field(default_factory=list)
+    exclusive: bool = False
 
 
 @runtime_checkable

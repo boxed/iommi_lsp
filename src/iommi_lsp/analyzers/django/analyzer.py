@@ -26,7 +26,7 @@ from urllib.parse import unquote, urlparse
 from typing import TYPE_CHECKING
 
 from ... import log
-from ..base import Analyzer, Diagnostic
+from ..base import Analyzer, CompletionResult, Diagnostic
 from . import lookup_walker
 from .index import (
     DjangoIndex,
@@ -279,38 +279,43 @@ class DjangoAnalyzer:
             _log.exception("orm-lookup scanner crashed; emitting nothing")
             return []
 
-    def completions(self, uri: str, position: dict) -> list[dict]:
+    def completions(self, uri: str, position: dict) -> CompletionResult:
         """Return LSP ``CompletionItem`` dicts for an ORM-lookup kwarg.
 
         Triggers when the cursor sits inside ``Model.objects.<method>(...)``
         at a position that could be the start of a kwarg name (the same
         method set we validate, ``filter``/``exclude``/``get``/``update``/
-        ``create``/``get_or_create``/``update_or_create``). Bias is the
-        same as the diagnostic path — any uncertainty about the call
-        site or the receiver model yields an empty list.
+        ``create``/``get_or_create``/``update_or_create``). On a
+        recognised position the result is *exclusive*: ty's name-of-any-
+        variable completions are noise here, so the matchmaker drops
+        them. On any uncertainty about the call site or the receiver
+        model, we return an empty non-exclusive result and let ty's
+        completions through.
         """
+        empty = CompletionResult()
         if not self.config.is_rule_enabled("orm_lookup"):
-            return []
+            return empty
         if not self.django_index.models:
-            return []
+            return empty
         path = _uri_to_path(uri)
         if path is None:
-            return []
+            return empty
         source = self._source_for(uri, path)
         if source is None:
-            return []
+            return empty
         try:
-            return list(self._scan_completions(source, position))
+            return self._scan_completions(source, position)
         except Exception:
             _log.exception("completion scanner crashed; emitting nothing")
-            return []
+            return empty
 
-    def _scan_completions(self, source: str, position: dict):
+    def _scan_completions(self, source: str, position: dict) -> CompletionResult:
+        empty = CompletionResult()
         line = int(position.get("line", 0))
         character = int(position.get("character", 0))
         offset = _offset_from_lsp_position(source, line, character)
         if offset > len(source):
-            return
+            return empty
 
         # Walk back over identifier chars at the cursor to find the partial
         # kwarg name the user has typed so far (may be empty).
@@ -336,24 +341,27 @@ class DjangoAnalyzer:
         try:
             tree = ast.parse(patched)
         except SyntaxError:
-            return
+            return empty
 
         marker_call = _find_marker_call(tree, marker)
         if marker_call is None:
-            return
+            return empty
         if not isinstance(marker_call.func, ast.Attribute):
-            return
+            return empty
         method = marker_call.func.attr
         if method not in _LOOKUP_METHODS:
-            return
+            return empty
 
         model = self._root_manager_model(marker_call.func.value, tree)
         if model is None:
-            return
+            # We recognised the call shape but can't say which model —
+            # don't suppress ty here, the user might know better.
+            return empty
 
-        yield from _field_completion_items(
+        items = list(_field_completion_items(
             self.django_index, model, partial
-        )
+        ))
+        return CompletionResult(items=items, exclusive=True)
 
     def _scan_lookups(self, parsed: _ParsedFile):
         for node in ast.walk(parsed.tree):

@@ -41,16 +41,17 @@ def _write_with_cursor(tmp_path: Path, src_before_cursor: str, src_after_cursor:
     return f.as_uri(), {"line": line, "character": character}
 
 
-def _labels(items: list[dict]) -> list[str]:
-    return [it["label"] for it in items]
+def _labels(result) -> list[str]:
+    return [it["label"] for it in result.items]
 
 
 def test_completion_empty_partial_returns_all_fields(analyzer_basic, tmp_path):
     uri, pos = _write_with_cursor(
         tmp_path, "from myapp.models import User\nUser.objects.filter("
     )
-    items = analyzer_basic.completions(uri, pos)
-    labels = set(_labels(items))
+    result = analyzer_basic.completions(uri, pos)
+    assert result.exclusive is True
+    labels = set(_labels(result))
     assert "username" in labels
     assert "email" in labels
     assert "pk" in labels
@@ -62,11 +63,12 @@ def test_completion_partial_prefix_filters(analyzer_basic, tmp_path):
     uri, pos = _write_with_cursor(
         tmp_path, "from myapp.models import User\nUser.objects.filter(em"
     )
-    items = analyzer_basic.completions(uri, pos)
-    assert _labels(items) == ["email"]
-    assert items[0]["insertText"] == "email="
-    assert items[0]["kind"] == 5   # CompletionItemKind.Field
-    assert items[0]["detail"] == "EmailField"
+    result = analyzer_basic.completions(uri, pos)
+    assert result.exclusive is True
+    assert _labels(result) == ["email"]
+    assert result.items[0]["insertText"] == "email="
+    assert result.items[0]["kind"] == 5   # CompletionItemKind.Field
+    assert result.items[0]["detail"] == "EmailField"
 
 
 def test_completion_after_existing_kwarg(analyzer_basic, tmp_path):
@@ -74,8 +76,9 @@ def test_completion_after_existing_kwarg(analyzer_basic, tmp_path):
         tmp_path,
         "from myapp.models import User\nUser.objects.filter(username='a', em",
     )
-    items = analyzer_basic.completions(uri, pos)
-    assert _labels(items) == ["email"]
+    result = analyzer_basic.completions(uri, pos)
+    assert result.exclusive is True
+    assert _labels(result) == ["email"]
 
 
 def test_completion_inside_chained_call(analyzer_basic, tmp_path):
@@ -85,8 +88,9 @@ def test_completion_inside_chained_call(analyzer_basic, tmp_path):
         "from myapp.models import User\n"
         "User.objects.filter(username='a').exclude(",
     )
-    items = analyzer_basic.completions(uri, pos)
-    assert "email" in _labels(items)
+    result = analyzer_basic.completions(uri, pos)
+    assert result.exclusive is True
+    assert "email" in _labels(result)
 
 
 def test_completion_outside_lookup_method_silent(analyzer_basic, tmp_path):
@@ -95,14 +99,19 @@ def test_completion_outside_lookup_method_silent(analyzer_basic, tmp_path):
         tmp_path,
         "from myapp.models import User\nUser.objects.annotate(em",
     )
-    assert analyzer_basic.completions(uri, pos) == []
+    result = analyzer_basic.completions(uri, pos)
+    assert result.exclusive is False
+    assert result.items == []
 
 
 def test_completion_unknown_receiver_silent(analyzer_basic, tmp_path):
+    # We see a `filter(` but can't resolve the receiver — let ty handle.
     uri, pos = _write_with_cursor(
         tmp_path, "def f(qs):\n    qs.filter(em"
     )
-    assert analyzer_basic.completions(uri, pos) == []
+    result = analyzer_basic.completions(uri, pos)
+    assert result.exclusive is False
+    assert result.items == []
 
 
 def test_completion_relation_field_target(analyzer_blog, tmp_path):
@@ -110,8 +119,8 @@ def test_completion_relation_field_target(analyzer_blog, tmp_path):
         tmp_path,
         "from blog.models import Article\nArticle.objects.filter(au",
     )
-    items = analyzer_blog.completions(uri, pos)
-    by_label = {it["label"]: it for it in items}
+    result = analyzer_blog.completions(uri, pos)
+    by_label = {it["label"]: it for it in result.items}
     assert "author" in by_label and "author_id" in by_label
     # detail shows the relation target on the field itself.
     assert "Author" in by_label["author"]["detail"]
@@ -122,9 +131,9 @@ def test_completion_reverse_relation_offered(analyzer_blog, tmp_path):
         tmp_path,
         "from blog.models import Author\nAuthor.objects.filter(art",
     )
-    items = analyzer_blog.completions(uri, pos)
-    assert _labels(items) == ["articles"]
-    assert "reverse" in items[0]["detail"]
+    result = analyzer_blog.completions(uri, pos)
+    assert _labels(result) == ["articles"]
+    assert "reverse" in result.items[0]["detail"]
 
 
 def test_completion_fk_id_accessor_offered(analyzer_basic, tmp_path):
@@ -144,8 +153,9 @@ def test_completion_for_local_queryset(analyzer_basic, tmp_path):
         "    qs = User.objects.all()\n"
         "    qs.filter(em",
     )
-    items = analyzer_basic.completions(uri, pos)
-    assert _labels(items) == ["email"]
+    result = analyzer_basic.completions(uri, pos)
+    assert result.exclusive is True
+    assert _labels(result) == ["email"]
 
 
 def test_completion_for_builtin_user(tmp_path: Path):
@@ -163,8 +173,20 @@ def test_completion_for_builtin_user(tmp_path: Path):
     source = "from django.contrib.auth.models import User\nUser.objects.filter(em"
     src_path.write_text(source)
     uri = src_path.as_uri()
-    items = a.completions(uri, {"line": 1, "character": 22})
-    assert _labels(items) == ["email"]
+    result = a.completions(uri, {"line": 1, "character": 22})
+    assert result.exclusive is True
+    assert _labels(result) == ["email"]
+
+
+def test_completion_partial_with_no_match_still_exclusive(analyzer_basic, tmp_path):
+    # User typed `zzz` — no field starts with that. We still own this
+    # position so ty's variable completions should be suppressed.
+    uri, pos = _write_with_cursor(
+        tmp_path, "from myapp.models import User\nUser.objects.filter(zzz"
+    )
+    result = analyzer_basic.completions(uri, pos)
+    assert result.exclusive is True
+    assert result.items == []
 
 
 def test_completion_disabled_via_config(analyzer_basic, tmp_path):
@@ -175,7 +197,9 @@ def test_completion_disabled_via_config(analyzer_basic, tmp_path):
     uri, pos = _write_with_cursor(
         tmp_path, "from myapp.models import User\nUser.objects.filter(em"
     )
-    assert analyzer_basic.completions(uri, pos) == []
+    result = analyzer_basic.completions(uri, pos)
+    assert result.exclusive is False
+    assert result.items == []
 
 
 def test_completion_text_provider_used(analyzer_basic, tmp_path):
@@ -190,5 +214,5 @@ def test_completion_text_provider_used(analyzer_basic, tmp_path):
     }
     analyzer_basic._text_provider = buffers.get
 
-    items = analyzer_basic.completions(uri, {"line": 1, "character": 22})
-    assert _labels(items) == ["email"]
+    result = analyzer_basic.completions(uri, {"line": 1, "character": 22})
+    assert _labels(result) == ["email"]

@@ -24,7 +24,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from . import log
-from .analyzers.base import Analyzer, Diagnostic
+from .analyzers.base import Analyzer, CompletionResult, Diagnostic
 
 
 _log = log.get("interceptor")
@@ -269,8 +269,8 @@ class CompletionMatchmaker:
         if context is None:
             return body
         uri, position = context
-        extras = self._items(uri, position)
-        if not extras:
+        extras, exclusive = self._gather(uri, position)
+        if not extras and not exclusive:
             return body
 
         # If ty errored on completion (e.g. it doesn't implement the
@@ -286,7 +286,12 @@ class CompletionMatchmaker:
             return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
         result = payload.get("result")
-        if result is None:
+        if exclusive:
+            # Drop whatever ty produced — at an ORM-kwarg position its
+            # free-form variable completions are noise. ``isIncomplete``
+            # is False so the editor stops asking for more.
+            payload["result"] = {"isIncomplete": False, "items": list(extras)}
+        elif result is None:
             payload["result"] = {"isIncomplete": False, "items": list(extras)}
         elif isinstance(result, list):
             payload["result"] = result + list(extras)
@@ -300,20 +305,33 @@ class CompletionMatchmaker:
 
         return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
-    def _items(self, uri: str, position: dict) -> list[dict]:
-        out: list[dict] = []
+    def _gather(self, uri: str, position: dict) -> tuple[list[dict], bool]:
+        """Collect items + exclusivity across analyzers.
+
+        Accepts both the structured ``CompletionResult`` return and the
+        legacy bare ``list[dict]`` — the latter is treated as
+        non-exclusive so older analyzer code keeps working.
+        """
+        all_items: list[dict] = []
+        exclusive = False
         for a in self.analyzers:
             fn = getattr(a, "completions", None)
             if fn is None:
                 continue
             try:
-                out.extend(fn(uri, position))
+                result = fn(uri, position)
             except Exception:
                 _log.exception(
                     "analyzer %s completions crashed",
                     getattr(a, "name", a),
                 )
-        return out
+                continue
+            if isinstance(result, CompletionResult):
+                all_items.extend(result.items)
+                exclusive = exclusive or result.exclusive
+            elif isinstance(result, list):
+                all_items.extend(result)
+        return all_items, exclusive
 
 
 # ---------------------------------------------------------------------------

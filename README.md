@@ -194,9 +194,17 @@ Triggered by `(` and `,` (and continuous-completion mode in most
 editors). The receiver-resolution rules match the diagnostic path —
 direct `Model.objects.…`, module-qualified `pkg.Model.objects.…`, and
 local queryset variables (`qs = User.objects.all(); qs.filter(em|)`).
-If the receiver doesn't resolve, no items are offered. If `ty`
-doesn't implement `textDocument/completion` we substitute our own
-response so the editor still sees them; if it does, we merge.
+
+At a recognised position we claim **exclusivity**: ty's items are
+dropped from the response so the user doesn't see noise like `em`
+matching any random local variable next to our `email=`. Empty +
+exclusive is intentional — if the partial matches no field, the
+editor shows nothing rather than back-filling with ty's free-form
+name list. When the receiver doesn't resolve (`qs.filter(em|` where
+we can't tell what `qs` is) we step back and let ty handle it. If
+ty errored on the completion request we substitute our own response;
+if ty responded normally we either replace (exclusive) or merge
+(non-exclusive).
 
 ### Built-in models and inheritance
 
