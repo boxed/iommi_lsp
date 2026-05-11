@@ -36,7 +36,7 @@ from .index import (
     collect_scrapes,
     update_scrapes,
 )
-from .magic import FK_LIKE_FIELD_NAMES
+from .magic import FK_LIKE_FIELD_NAMES, ORM_LOOKUP_NAMES, RELATION_FIELD_NAMES
 
 if TYPE_CHECKING:
     from ...config import Config
@@ -358,9 +358,27 @@ class DjangoAnalyzer:
             # don't suppress ty here, the user might know better.
             return empty
 
-        items = list(_field_completion_items(
-            self.django_index, model, partial
-        ))
+        # `foreign_key__name` — walk the chain so completions reflect the
+        # target model, not the receiver. The last `__`-segment is the
+        # in-progress identifier; everything before it is the chain.
+        if "__" in partial:
+            head, _, suffix = partial.rpartition("__")
+            chain = lookup_walker.split_chain(head)
+            target = _walk_chain_for_completion(
+                self.django_index, model, chain
+            )
+            if target is None:
+                # Chain didn't resolve to something we can complete on
+                # (unknown segment, or terminated at a non-relation leaf).
+                # Still our position — bias toward exclusive empty.
+                return CompletionResult(items=[], exclusive=True)
+            items = list(_field_completion_items(
+                self.django_index, target, suffix, prefix=head + "__"
+            ))
+        else:
+            items = list(_field_completion_items(
+                self.django_index, model, partial
+            ))
         return CompletionResult(items=items, exclusive=True)
 
     def _scan_lookups(self, parsed: _ParsedFile):
@@ -848,12 +866,16 @@ def _find_marker_call(tree: ast.AST, marker: str) -> ast.Call | None:
     return None
 
 
-def _field_completion_items(index, model, partial: str):
+def _field_completion_items(index, model, partial: str, prefix: str = ""):
     """Yield ``CompletionItem``-shaped dicts for *model*'s queryable names.
 
     Combines declared fields, FK-id accessors, the ``pk`` alias, and
     reverse-relation accessors. Each item carries ``insertText=name=``
     so accepting a completion drops the cursor right after the ``=``.
+
+    When *prefix* is non-empty (a ``foo__`` chain typed before the cursor),
+    the label and insertText include it so the editor replaces the whole
+    word — without that, accepting a completion would clobber the chain.
     """
     items: dict[str, dict] = {}
     for name in model.fields:
@@ -877,13 +899,51 @@ def _field_completion_items(index, model, partial: str):
         if partial and not name.startswith(partial):
             continue
         item = items[name]
+        full = f"{prefix}{name}"
         yield {
-            "label": item["label"],
+            "label": full,
             "kind": 5,  # CompletionItemKind.Field
-            "insertText": f"{name}=",
+            "insertText": f"{full}=",
             "detail": item["detail"],
             "data": {"source": "iommi-lsp.orm-kwarg", "model": model.qualname},
         }
+
+
+def _walk_chain_for_completion(
+    index, start: "ModelInfo", chain: list[str]
+) -> "ModelInfo | None":
+    """Walk *chain* from *start* and return the model to complete on.
+
+    Returns the target model when every segment is a relation (forward
+    FK/OneToOne/M2M or reverse accessor) and the chain ends on one. Any
+    non-relation segment (concrete field, ``pk``, FK-id accessor, ORM
+    lookup name) terminates the walk with ``None`` — there's nothing
+    meaningful to complete past a scalar.
+
+    Mirrors the conventions of :mod:`lookup_walker` but is structured for
+    completion rather than validation: unknown segments also return
+    ``None`` so we don't suppress ty with bogus suggestions.
+    """
+    current: "ModelInfo | None" = start
+    for seg in chain:
+        if current is None:
+            return None
+        if seg == "pk" or seg in current.fk_id_accessors:
+            return None
+        fi = current.fields.get(seg)
+        if fi is None:
+            source = index.reverse_source(current.qualname, seg)
+            if source is None:
+                return None
+            current = index.models.get(source)
+            continue
+        if fi.field_type not in RELATION_FIELD_NAMES:
+            return None
+        target = fi.target
+        if target is None:
+            return None
+        current = index.models.get(target)
+    return current
 
 
 def _field_detail(fi) -> str:

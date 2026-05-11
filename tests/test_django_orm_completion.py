@@ -202,6 +202,85 @@ def test_completion_disabled_via_config(analyzer_basic, tmp_path):
     assert result.items == []
 
 
+def test_completion_fk_chain_suggests_target_fields(analyzer_blog, tmp_path):
+    # `Article.author` is a FK to Author — `author__` should suggest fields
+    # on Author, not Article.
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from blog.models import Article\nArticle.objects.filter(author__",
+    )
+    result = analyzer_blog.completions(uri, pos)
+    assert result.exclusive is True
+    labels = set(_labels(result))
+    assert "author__name" in labels
+    assert "author__pk" in labels
+    # Article fields (title) must NOT appear — we've traversed away from it.
+    assert "author__title" not in labels
+    # insertText round-trips the chain so accepting doesn't clobber `author__`.
+    by_label = {it["label"]: it for it in result.items}
+    assert by_label["author__name"]["insertText"] == "author__name="
+
+
+def test_completion_fk_chain_partial_filters(analyzer_blog, tmp_path):
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from blog.models import Article\nArticle.objects.filter(author__na",
+    )
+    result = analyzer_blog.completions(uri, pos)
+    assert result.exclusive is True
+    assert _labels(result) == ["author__name"]
+    assert result.items[0]["insertText"] == "author__name="
+
+
+def test_completion_reverse_relation_chain(analyzer_blog, tmp_path):
+    # `Author.articles` is the reverse of Article.author — chain through it
+    # to suggest fields on Article.
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from blog.models import Author\nAuthor.objects.filter(articles__",
+    )
+    result = analyzer_blog.completions(uri, pos)
+    assert result.exclusive is True
+    labels = set(_labels(result))
+    assert "articles__title" in labels
+    assert "articles__author" in labels
+
+
+def test_completion_chain_through_leaf_field_silent(analyzer_blog, tmp_path):
+    # `title` is a CharField — there's no model to traverse to. Exclusive
+    # empty so ty's variable noise doesn't surface here.
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from blog.models import Article\nArticle.objects.filter(title__",
+    )
+    result = analyzer_blog.completions(uri, pos)
+    assert result.exclusive is True
+    assert result.items == []
+
+
+def test_completion_chain_through_unknown_field_silent(analyzer_blog, tmp_path):
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from blog.models import Article\nArticle.objects.filter(zzz__",
+    )
+    result = analyzer_blog.completions(uri, pos)
+    assert result.exclusive is True
+    assert result.items == []
+
+
+def test_completion_multi_hop_fk_chain(analyzer_blog, tmp_path):
+    # Comment.article -> Article.author -> Author
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from blog.models import Comment\n"
+        "Comment.objects.filter(article__author__",
+    )
+    result = analyzer_blog.completions(uri, pos)
+    assert result.exclusive is True
+    labels = set(_labels(result))
+    assert "article__author__name" in labels
+
+
 def test_completion_text_provider_used(analyzer_basic, tmp_path):
     # Disk has a closed call; live buffer has the partial.
     src_path = tmp_path / "u.py"
