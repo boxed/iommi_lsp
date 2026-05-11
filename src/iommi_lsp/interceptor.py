@@ -35,6 +35,7 @@ DID_OPEN = "textDocument/didOpen"
 DID_CHANGE = "textDocument/didChange"
 DID_SAVE = "textDocument/didSave"
 DID_CLOSE = "textDocument/didClose"
+COMPLETION = "textDocument/completion"
 
 
 class DocumentStore:
@@ -176,6 +177,142 @@ class DiagnosticInterceptor:
                 out.extend(adder(uri))
             except Exception:
                 _log.exception("analyzer %s additional_diagnostics crashed", getattr(a, "name", a))
+        return out
+
+
+def _ensure_completion_capability(payload: dict, original_body: bytes) -> bytes:
+    """Patch an ``initialize`` response so the editor knows we offer
+    completions. If ty already advertises ``completionProvider`` we
+    leave the payload alone; otherwise we add a minimal entry. The
+    matchmaker's ``on_response`` handler is what actually fills the
+    items at request time.
+    """
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return original_body
+    caps = result.get("capabilities")
+    if not isinstance(caps, dict):
+        caps = {}
+        result["capabilities"] = caps
+    if "completionProvider" in caps:
+        return original_body
+    caps["completionProvider"] = {
+        "triggerCharacters": ["(", ","],
+        "resolveProvider": False,
+    }
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
+class CompletionMatchmaker:
+    """Two-sided hook that augments completion responses with analyzer items.
+
+    Editor → ty: captures every ``textDocument/completion`` request's
+    id alongside its uri/position. The body is forwarded unchanged.
+
+    ty → editor: when a response carries an id we've captured, we
+    compute the analyzers' completions for that uri/position and merge
+    them into ``result.items`` (handling both the list and
+    ``CompletionList`` response shapes). Unmatched responses pass
+    through untouched, so this is zero-cost when no analyzer is
+    interested.
+    """
+
+    def __init__(self, analyzers: Sequence[Analyzer] = ()) -> None:
+        self.analyzers: list[Analyzer] = list(analyzers)
+        self._pending: dict[Any, tuple[str, dict]] = {}
+        self._pending_initialize: set[Any] = set()
+
+    async def on_request(self, body: bytes) -> bytes | None:
+        if not body or body[:1] != b"{":
+            return body
+        try:
+            payload: Any = json.loads(body)
+        except json.JSONDecodeError:
+            return body
+        if not isinstance(payload, dict):
+            return body
+        method = payload.get("method")
+        msg_id = payload.get("id")
+        if method == INITIALIZE and msg_id is not None:
+            self._pending_initialize.add(msg_id)
+            return body
+        if method != COMPLETION:
+            return body
+        if msg_id is None:
+            # Notifications shouldn't carry textDocument/completion, but
+            # tolerate the malformed case by forwarding silently.
+            return body
+        params = payload.get("params") or {}
+        doc = (params.get("textDocument") or {})
+        uri = doc.get("uri")
+        position = params.get("position")
+        if isinstance(uri, str) and isinstance(position, dict):
+            self._pending[msg_id] = (uri, position)
+        return body
+
+    async def on_response(self, body: bytes) -> bytes | None:
+        if not body or body[:1] != b"{":
+            return body
+        try:
+            payload: Any = json.loads(body)
+        except json.JSONDecodeError:
+            return body
+        if not isinstance(payload, dict):
+            return body
+        msg_id = payload.get("id")
+        if msg_id is None:
+            return body
+        if msg_id in self._pending_initialize:
+            self._pending_initialize.discard(msg_id)
+            return _ensure_completion_capability(payload, body)
+        context = self._pending.pop(msg_id, None)
+        if context is None:
+            return body
+        uri, position = context
+        extras = self._items(uri, position)
+        if not extras:
+            return body
+
+        # If ty errored on completion (e.g. it doesn't implement the
+        # method), swap the error for a success containing our items —
+        # otherwise the editor would surface ty's error and discard the
+        # whole response.
+        if "error" in payload and "result" not in payload:
+            payload.pop("error", None)
+            payload["result"] = {
+                "isIncomplete": False,
+                "items": list(extras),
+            }
+            return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+        result = payload.get("result")
+        if result is None:
+            payload["result"] = {"isIncomplete": False, "items": list(extras)}
+        elif isinstance(result, list):
+            payload["result"] = result + list(extras)
+        elif isinstance(result, dict):
+            existing = list(result.get("items") or [])
+            existing.extend(extras)
+            result["items"] = existing
+            payload["result"] = result
+        else:
+            return body   # unexpected shape; don't touch
+
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    def _items(self, uri: str, position: dict) -> list[dict]:
+        out: list[dict] = []
+        for a in self.analyzers:
+            fn = getattr(a, "completions", None)
+            if fn is None:
+                continue
+            try:
+                out.extend(fn(uri, position))
+            except Exception:
+                _log.exception(
+                    "analyzer %s completions crashed",
+                    getattr(a, "name", a),
+                )
         return out
 
 

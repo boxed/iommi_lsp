@@ -22,7 +22,12 @@ from . import __version__, log, proxy
 from .analyzers.django import DjangoAnalyzer, build_index
 from .analyzers.iommi import IommiAnalyzer
 from .analyzers.iommi.build import GraphBuildError, build_for_workspace
-from .interceptor import DiagnosticInterceptor, DocumentStore, EditorRequestSniffer
+from .interceptor import (
+    CompletionMatchmaker,
+    DiagnosticInterceptor,
+    DocumentStore,
+    EditorRequestSniffer,
+)
 
 
 _log = log.get("cli")
@@ -110,6 +115,7 @@ def _run_proxy(ty_command_str: str, workspace: Path | None) -> int:
     analyzers = [django_analyzer, iommi_analyzer]
 
     interceptor = DiagnosticInterceptor(analyzers=analyzers)
+    matchmaker = CompletionMatchmaker(analyzers=analyzers)
 
     async def workspace_seen(root: Path) -> None:
         for a in analyzers:
@@ -125,29 +131,44 @@ def _run_proxy(ty_command_str: str, workspace: Path | None) -> int:
         document_store=documents,
     )
 
+    editor_to_ty = _chain_hooks(sniffer, matchmaker.on_request)
+    ty_to_editor = _chain_hooks(matchmaker.on_response, interceptor)
+
     backend_env = _backend_env(root, os.environ)
 
     if workspace is not None:
         return asyncio.run(_eager_index_then_serve(
-            ty_command, analyzers, workspace, interceptor, sniffer, backend_env,
+            ty_command, analyzers, workspace, editor_to_ty, ty_to_editor, backend_env,
         ))
     return asyncio.run(proxy.run(
         ty_command,
-        editor_to_ty_hook=sniffer,
-        ty_to_editor_hook=interceptor,
+        editor_to_ty_hook=editor_to_ty,
+        ty_to_editor_hook=ty_to_editor,
         env=backend_env,
     ))
 
 
+def _chain_hooks(*hooks):
+    """Compose proxy hooks left-to-right. Each hook receives the bytes
+    produced by the previous; ``None`` from any link short-circuits."""
+    async def call(body: bytes) -> bytes | None:
+        for h in hooks:
+            if body is None:
+                return None
+            body = await h(body)
+        return body
+    return call
+
+
 async def _eager_index_then_serve(
-    ty_command, analyzers, workspace, interceptor, sniffer, env,
+    ty_command, analyzers, workspace, editor_to_ty_hook, ty_to_editor_hook, env,
 ) -> int:
     for a in analyzers:
         await a.index(workspace)
     return await proxy.run(
         ty_command,
-        editor_to_ty_hook=sniffer,
-        ty_to_editor_hook=interceptor,
+        editor_to_ty_hook=editor_to_ty_hook,
+        ty_to_editor_hook=ty_to_editor_hook,
         env=env,
     )
 

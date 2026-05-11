@@ -180,6 +180,24 @@ entirely with:
 disabled_rules = ["orm_lookup"]
 ```
 
+### ORM-kwarg completion
+
+When the cursor is inside `Model.objects.<lookup_method>(...)` (the
+same method set the diagnostic covers — `filter`/`exclude`/`get`/
+`update`/`create`/`get_or_create`/`update_or_create`) and you've typed
+the start of a kwarg name, the LSP suggests every queryable name on
+the model: declared fields, FK `_id` accessors, the `pk` alias, and
+reverse-relation accessors. Each suggestion inserts as `name=` so the
+caret lands inside the value position.
+
+Triggered by `(` and `,` (and continuous-completion mode in most
+editors). The receiver-resolution rules match the diagnostic path —
+direct `Model.objects.…`, module-qualified `pkg.Model.objects.…`, and
+local queryset variables (`qs = User.objects.all(); qs.filter(em|)`).
+If the receiver doesn't resolve, no items are offered. If `ty`
+doesn't implement `textDocument/completion` we substitute our own
+response so the editor still sees them; if it does, we merge.
+
 ### Built-in models and inheritance
 
 The index bundles a static stub of the Django contrib models so projects

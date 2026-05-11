@@ -279,6 +279,82 @@ class DjangoAnalyzer:
             _log.exception("orm-lookup scanner crashed; emitting nothing")
             return []
 
+    def completions(self, uri: str, position: dict) -> list[dict]:
+        """Return LSP ``CompletionItem`` dicts for an ORM-lookup kwarg.
+
+        Triggers when the cursor sits inside ``Model.objects.<method>(...)``
+        at a position that could be the start of a kwarg name (the same
+        method set we validate, ``filter``/``exclude``/``get``/``update``/
+        ``create``/``get_or_create``/``update_or_create``). Bias is the
+        same as the diagnostic path — any uncertainty about the call
+        site or the receiver model yields an empty list.
+        """
+        if not self.config.is_rule_enabled("orm_lookup"):
+            return []
+        if not self.django_index.models:
+            return []
+        path = _uri_to_path(uri)
+        if path is None:
+            return []
+        source = self._source_for(uri, path)
+        if source is None:
+            return []
+        try:
+            return list(self._scan_completions(source, position))
+        except Exception:
+            _log.exception("completion scanner crashed; emitting nothing")
+            return []
+
+    def _scan_completions(self, source: str, position: dict):
+        line = int(position.get("line", 0))
+        character = int(position.get("character", 0))
+        offset = _offset_from_lsp_position(source, line, character)
+        if offset > len(source):
+            return
+
+        # Walk back over identifier chars at the cursor to find the partial
+        # kwarg name the user has typed so far (may be empty).
+        partial_start = offset
+        while partial_start > 0 and (
+            source[partial_start - 1].isalnum()
+            or source[partial_start - 1] == "_"
+        ):
+            partial_start -= 1
+        partial = source[partial_start:offset]
+
+        # Patch the source so it parses: replace everything from the
+        # partial onward with `<marker>=None`, then append closes to
+        # balance any open brackets above the cursor. This turns an
+        # in-progress `filter(em` into `filter(__marker__=None)` which
+        # ast can chew on; the marker keyword is what we find later.
+        marker = "__iommi_lsp_completion_marker__"
+        head = source[:partial_start]
+        inserted = marker + "=None"
+        closes = _close_brackets(head + inserted)
+        patched = head + inserted + closes
+
+        try:
+            tree = ast.parse(patched)
+        except SyntaxError:
+            return
+
+        marker_call = _find_marker_call(tree, marker)
+        if marker_call is None:
+            return
+        if not isinstance(marker_call.func, ast.Attribute):
+            return
+        method = marker_call.func.attr
+        if method not in _LOOKUP_METHODS:
+            return
+
+        model = self._root_manager_model(marker_call.func.value, tree)
+        if model is None:
+            return
+
+        yield from _field_completion_items(
+            self.django_index, model, partial
+        )
+
     def _scan_lookups(self, parsed: _ParsedFile):
         for node in ast.walk(parsed.tree):
             if not isinstance(node, ast.Call):
@@ -690,6 +766,122 @@ def _make_orm_diagnostic(
             "available": list(problem.available),
         },
     }
+
+
+def _offset_from_lsp_position(text: str, line: int, character: int) -> int:
+    """Convert LSP ``{line, character}`` to a Python ``str`` offset.
+
+    LSP characters are UTF-16 code units; non-BMP code points (emoji)
+    count as two. For ASCII Python source — the overwhelming common
+    case — this collapses to straight character indexing.
+    """
+    offset = 0
+    cur_line = 0
+    n = len(text)
+    while offset < n and cur_line < line:
+        if text[offset] == "\n":
+            cur_line += 1
+        offset += 1
+    char_units = 0
+    while offset < n and char_units < character:
+        ch = text[offset]
+        if ch == "\n":
+            break
+        char_units += 2 if ord(ch) > 0xFFFF else 1
+        offset += 1
+    return offset
+
+
+def _close_brackets(src: str) -> str:
+    """Return the closing tokens needed to balance *src*.
+
+    Best-effort string-aware scan — triple-quoted strings and f-strings
+    can confuse the cursor over multiple lines, but the resulting parse
+    just fails and completion is suppressed.
+    """
+    stack: list[str] = []
+    pair = {"(": ")", "[": "]", "{": "}"}
+    in_string: str | None = None
+    i = 0
+    n = len(src)
+    while i < n:
+        ch = src[i]
+        if in_string is not None:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == in_string:
+                in_string = None
+            i += 1
+            continue
+        if ch in '"\'':
+            in_string = ch
+        elif ch in "([{":
+            stack.append(pair[ch])
+        elif ch in ")]}":
+            if stack and stack[-1] == ch:
+                stack.pop()
+        elif ch == "#":
+            j = src.find("\n", i)
+            i = n if j == -1 else j
+            continue
+        i += 1
+    return "".join(reversed(stack))
+
+
+def _find_marker_call(tree: ast.AST, marker: str) -> ast.Call | None:
+    """Return the smallest ``Call`` that has *marker* as a keyword name."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg == marker:
+                return node
+    return None
+
+
+def _field_completion_items(index, model, partial: str):
+    """Yield ``CompletionItem``-shaped dicts for *model*'s queryable names.
+
+    Combines declared fields, FK-id accessors, the ``pk`` alias, and
+    reverse-relation accessors. Each item carries ``insertText=name=``
+    so accepting a completion drops the cursor right after the ``=``.
+    """
+    items: dict[str, dict] = {}
+    for name in model.fields:
+        items[name] = {
+            "label": name,
+            "detail": _field_detail(model.fields[name]),
+        }
+    for name in model.fk_id_accessors:
+        items.setdefault(name, {
+            "label": name,
+            "detail": "FK underlying-column accessor",
+        })
+    items.setdefault("pk", {"label": "pk", "detail": "primary key alias"})
+    for name, source in (index.reverse_relations.get(model.qualname) or {}).items():
+        items.setdefault(name, {
+            "label": name,
+            "detail": f"reverse relation → {source}",
+        })
+
+    for name in sorted(items):
+        if partial and not name.startswith(partial):
+            continue
+        item = items[name]
+        yield {
+            "label": item["label"],
+            "kind": 5,  # CompletionItemKind.Field
+            "insertText": f"{name}=",
+            "detail": item["detail"],
+            "data": {"source": "iommi-lsp.orm-kwarg", "model": model.qualname},
+        }
+
+
+def _field_detail(fi) -> str:
+    if fi.target:
+        return f"{fi.field_type} → {fi.target}"
+    return fi.field_type
 
 
 def _enclosing_function(tree: ast.Module, target: ast.AST) -> ast.AST | None:
