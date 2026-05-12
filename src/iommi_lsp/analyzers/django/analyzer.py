@@ -254,6 +254,15 @@ class DjangoAnalyzer:
     def is_false_positive(self, uri: str, diagnostic: Diagnostic) -> bool:  # type: ignore[override]
         if not self.config.enabled:
             return False
+        if (
+            _is_unused_request(diagnostic)
+            and self.config.is_rule_enabled("unused_request_param")
+        ):
+            try:
+                return self._is_first_request_param(uri, diagnostic)
+            except Exception:
+                _log.exception("unused-request check crashed; keeping the diagnostic")
+                return False
         if not _is_unresolved_attribute(diagnostic):
             return False
         try:
@@ -261,6 +270,35 @@ class DjangoAnalyzer:
         except Exception:
             _log.exception("analyzer crashed; keeping the diagnostic")
             return False
+
+    def _is_first_request_param(self, uri: str, diagnostic: Diagnostic) -> bool:
+        path = _uri_to_path(uri)
+        if path is None:
+            return False
+        parsed = self._parse(uri, path)
+        if parsed is None:
+            return False
+        rng = diagnostic.get("range") or {}
+        start = rng.get("start") or {}
+        # LSP positions are 0-indexed; AST line numbers are 1-indexed.
+        line_no = int(start.get("line", 0)) + 1
+        col = int(start.get("character", 0))
+        for node in ast.walk(parsed.tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            params = list(node.args.posonlyargs) + list(node.args.args)
+            # Skip self/cls so class-based views (`def get(self, request, ...)`)
+            # are still treated as having `request` first.
+            if params and params[0].arg in ("self", "cls"):
+                params = params[1:]
+            if not params:
+                continue
+            first = params[0]
+            if first.arg != "request":
+                continue
+            if first.lineno == line_no and first.col_offset == col:
+                return True
+        return False
 
     def additional_diagnostics(self, uri: str) -> list[Diagnostic]:
         if not self.config.is_rule_enabled("orm_lookup"):
@@ -578,6 +616,18 @@ def _is_unresolved_attribute(diagnostic: Diagnostic) -> bool:
     if isinstance(code, dict) and code.get("value") == "unresolved-attribute":
         return True
     return False
+
+
+def _is_unused_request(diagnostic: Diagnostic) -> bool:
+    """Match ty's hint ``\\`request\\` is unused``. ty emits this with no
+    diagnostic code, so we sniff source + message text directly.
+    """
+    if diagnostic.get("source") != "ty":
+        return False
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return False
+    return message.strip() == "`request` is unused"
 
 
 def _uri_to_path(uri: str) -> Path | None:

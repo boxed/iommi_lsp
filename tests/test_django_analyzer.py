@@ -229,3 +229,106 @@ def test_unrelated_attribute_is_kept(tmp_path: Path):
     diag = _diag(line, start, start + len("objects_typo"), "objects_typo")
 
     assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def _unused_diag(line: int, col_start: int, col_end: int, name: str = "request"):
+    """Mirror ty's actual ``\\`x\\` is unused`` hint shape (no ``code``)."""
+    return {
+        "message": f"`{name}` is unused",
+        "range": {
+            "start": {"line": line, "character": col_start},
+            "end": {"line": line, "character": col_end},
+        },
+        "severity": 4,
+        "source": "ty",
+        "tags": [1],
+    }
+
+
+def test_unused_request_first_param_is_dropped(tmp_path: Path):
+    """`def view(request): ...` — request unused, drop ty's hint."""
+    src = "def my_view(request):\n    return None\n"
+    f = tmp_path / "v.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 0
+    start = src.splitlines()[line].index("request")
+    diag = _unused_diag(line, start, start + len("request"))
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_unused_request_on_method_is_dropped(tmp_path: Path):
+    """CBV-style `def get(self, request, ...)` — `self` skipped, request is first."""
+    src = (
+        "class V:\n"
+        "    def get(self, request):\n"
+        "        return None\n"
+    )
+    f = tmp_path / "v.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 1
+    start = src.splitlines()[line].index("request")
+    diag = _unused_diag(line, start, start + len("request"))
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_unused_request_not_first_param_is_kept(tmp_path: Path):
+    """`def f(x, request)` — request isn't the first non-self/cls arg, keep the hint."""
+    src = "def helper(x, request):\n    return x\n"
+    f = tmp_path / "v.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 0
+    start = src.splitlines()[line].index("request")
+    diag = _unused_diag(line, start, start + len("request"))
+
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_unused_non_request_param_is_kept(tmp_path: Path):
+    """Only `request` gets the exception — other unused params still flag."""
+    src = "def helper(payload):\n    return None\n"
+    f = tmp_path / "v.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 0
+    start = src.splitlines()[line].index("payload")
+    diag = _unused_diag(line, start, start + len("payload"), name="payload")
+
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_unused_request_local_variable_is_kept(tmp_path: Path):
+    """An unused *local variable* named `request` still flags — only the
+    function parameter position is whitelisted."""
+    src = (
+        "def handler():\n"
+        "    request = None\n"
+        "    return None\n"
+    )
+    f = tmp_path / "v.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 1
+    start = src.splitlines()[line].index("request")
+    diag = _unused_diag(line, start, start + len("request"))
+
+    assert a.is_false_positive(f.as_uri(), diag) is False

@@ -27,6 +27,11 @@ A Django and iommi language server that proxies to
   (`objects`, `_meta`, `pk`/`id`, `<fk>_id`, reverse relations,
   `DoesNotExist`, …) are dropped before they reach the editor. Real
   bugs survive.
+* **No more `` `request` is unused `` nags on views.** Django view
+  functions take `request` whether they read it or not — ty's hint is
+  dropped when `request` is the first parameter (or first after
+  `self`/`cls` on a class-based view). Other unused params still flag,
+  and an unused *local* `request` variable still flags.
 * **Built-in models + abstract inheritance.** `django.contrib.auth`
   / `contenttypes` / `sessions` models are stubbed so they work out
   of the box, and abstract-base fields propagate to concrete
@@ -326,8 +331,9 @@ manager = ["mongo", "search"]            # treat these as Manager-like attrs
 ```
 
 Recognised rule groups: `manager`, `meta`, `pk`, `exception`, `fk_id`,
-`reverse`, `orm_lookup`. Unknown groups in `disabled_rules` are ignored
-with a stderr warning rather than silently breaking the filter.
+`reverse`, `orm_lookup`, `unused_request_param`. Unknown groups in
+`disabled_rules` are ignored with a stderr warning rather than silently
+breaking the filter.
 
 A missing or malformed `pyproject.toml` falls back to defaults; the
 proxy never crashes on a bad config.
