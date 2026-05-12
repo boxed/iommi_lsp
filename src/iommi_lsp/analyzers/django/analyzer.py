@@ -75,7 +75,7 @@ _MANAGER_NAMES = frozenset({"objects", "_default_manager", "_base_manager"})
 _METHOD_ONLY_KWARGS = frozenset({"defaults", "create_defaults"})
 
 _ORM_LOOKUP_DIAG_CODE = "django-unknown-orm-lookup"
-_ORM_LOOKUP_DIAG_SOURCE = "iommi-lsp"
+_ORM_LOOKUP_DIAG_SOURCE = "iommi_lsp"
 
 
 @dataclass
@@ -905,7 +905,7 @@ def _field_completion_items(index, model, partial: str, prefix: str = ""):
             "kind": 5,  # CompletionItemKind.Field
             "insertText": f"{full}=",
             "detail": item["detail"],
-            "data": {"source": "iommi-lsp.orm-kwarg", "model": model.qualname},
+            "data": {"source": "iommi_lsp.orm-kwarg", "model": model.qualname},
         }
 
 

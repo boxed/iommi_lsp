@@ -1,4 +1,4 @@
-# iommi-lsp
+# iommi_lsp
 
 A Django and iommi language server that proxies to
 [`ty`](https://github.com/astral-sh/ty) for broad Python support.
@@ -68,40 +68,40 @@ contract test suite (`tests/test_contract_real_ty.py`).
 ## Install
 
 ```sh
-uv tool install iommi-lsp     # or: pipx install iommi-lsp
+uv tool install iommi_lsp     # or: pipx install iommi_lsp
 ```
 
-`ty` is a hard dependency and is installed alongside `iommi-lsp` into
+`ty` is a hard dependency and is installed alongside `iommi_lsp` into
 the same environment, so the default just works — no editor-side
 `--ty-command` plumbing required.
 
 ## Run
 
 ```sh
-iommi-lsp                                    # spawns the bundled `ty server`
-iommi-lsp --ty-command "uvx ty server"       # override (e.g. pin a different ty)
-iommi-lsp --workspace ./myproject            # eager indexing for debugging
-iommi-lsp index ./myproject                  # dump the Django model index and exit
-iommi-lsp graph build ./myproject            # reflect installed iommi -> .iommi-lsp-graph.json
+iommi_lsp                                    # spawns the bundled `ty server`
+iommi_lsp --ty-command "uvx ty server"       # override (e.g. pin a different ty)
+iommi_lsp --workspace ./myproject            # eager indexing for debugging
+iommi_lsp index ./myproject                  # dump the Django model index and exit
+iommi_lsp graph build ./myproject            # reflect installed iommi -> .iommi_lsp-graph.json
 ```
 
-**For the iommi analyzer**, the graph at `.iommi-lsp-graph.json` is built
+**For the iommi analyzer**, the graph at `.iommi_lsp-graph.json` is built
 automatically when the workspace is opened:
 
-1. **In-process** if `iommi` is importable from `iommi-lsp`'s interpreter
-   (i.e. installed alongside it: `uv tool install --with iommi iommi-lsp`).
+1. **In-process** if `iommi` is importable from `iommi_lsp`'s interpreter
+   (i.e. installed alongside it: `uv tool install --with iommi iommi_lsp`).
 2. **Subprocess** against the workspace's `.venv` / `venv` Python, when
-   `iommi-lsp` is installed there too.
+   `iommi_lsp` is installed there too.
 3. **Synthesized stubs** for the well-known iommi classes (`Table`,
    `Form`, `Query`, `Page`) as a last resort — enough that `auto__…` and
    members-name completion still work before any graph build succeeds.
 
-Running `iommi-lsp graph build` by hand is still supported and is the
+Running `iommi_lsp graph build` by hand is still supported and is the
 fastest way to force a rebuild after upgrading iommi. The graph is a few
 hundred KB JSON in your workspace root; check it in or `.gitignore` it
 as you prefer.
 
-`iommi-lsp` writes diagnostics-side stderr logs; tune via
+`iommi_lsp` writes diagnostics-side stderr logs; tune via
 `IOMMI_LSP_LOG=DEBUG` or `--log-level DEBUG`.
 
 ## Editor configuration
@@ -115,7 +115,7 @@ local configs = require("lspconfig.configs")
 if not configs.iommi_lsp then
   configs.iommi_lsp = {
     default_config = {
-      cmd = { "iommi-lsp" },
+      cmd = { "iommi_lsp" },
       filetypes = { "python" },
       root_dir = lspconfig.util.root_pattern("pyproject.toml", ".git"),
       single_file_support = false,
@@ -129,12 +129,12 @@ lspconfig.iommi_lsp.setup({})
 ### Helix (`languages.toml`)
 
 ```toml
-[language-server.iommi-lsp]
-command = "iommi-lsp"
+[language-server.iommi_lsp]
+command = "iommi_lsp"
 
 [[language]]
 name = "python"
-language-servers = ["iommi-lsp"]
+language-servers = ["iommi_lsp"]
 ```
 
 ### Zed (`settings.json` under `lsp`)
@@ -142,13 +142,13 @@ language-servers = ["iommi-lsp"]
 ```json
 {
   "lsp": {
-    "iommi-lsp": {
-      "binary": { "path": "iommi-lsp" }
+    "iommi_lsp": {
+      "binary": { "path": "iommi_lsp" }
     }
   },
   "languages": {
     "Python": {
-      "language_servers": ["iommi-lsp"]
+      "language_servers": ["iommi_lsp"]
     }
   }
 }
@@ -159,11 +159,11 @@ language-servers = ["iommi-lsp"]
 There's no first-party VS Code extension yet. The simplest path is the
 [`vscode-generic-lsp-client`](https://marketplace.visualstudio.com/items?itemName=ms-toolsai.jupyter)
 pattern: install a generic LSP-client extension and point it at
-`iommi-lsp`. A first-party extension is on the roadmap.
+`iommi_lsp`. A first-party extension is on the roadmap.
 
 ## How the iommi analyzer works
 
-`iommi-lsp graph build` (or the auto-build at startup) imports iommi
+`iommi_lsp graph build` (or the auto-build at startup) imports iommi
 in your venv and walks each `Refinable`-declaring class (`Table`,
 `Column`, `Form`, `Field`, …) transitively through `class_ref` and
 `members` edges. Every refinable gets one of these kinds:
@@ -209,7 +209,7 @@ refinables. Three flavours of completion fire from the same position:
   member-name list drawn from the `User` model's fields.
 
 Synthesised stubs cover `Table`, `Form`, `Query`, and `Page` so the
-above all works before `iommi-lsp graph build` ever succeeds; the
+above all works before `iommi_lsp graph build` ever succeeds; the
 project's own iommi subclasses light up once a real graph is available.
 
 ## How the Django filter works
@@ -266,7 +266,7 @@ model, we say nothing rather than risk a false positive. Disable
 entirely with:
 
 ```toml
-[tool.iommi-lsp]
+[tool.iommi_lsp]
 disabled_rules = ["orm_lookup"]
 ```
 
@@ -314,14 +314,14 @@ class Meta: abstract = True` lets a `Book(Timestamped)` filter on
 
 ## Per-project configuration
 
-Add a `[tool.iommi-lsp]` table to your `pyproject.toml`:
+Add a `[tool.iommi_lsp]` table to your `pyproject.toml`:
 
 ```toml
-[tool.iommi-lsp]
+[tool.iommi_lsp]
 enabled = true                          # master switch
 disabled_rules = ["pk", "reverse"]       # skip rule groups for this project
 
-[tool.iommi-lsp.extra_magic_attrs]
+[tool.iommi_lsp.extra_magic_attrs]
 manager = ["mongo", "search"]            # treat these as Manager-like attrs
 ```
 
@@ -338,10 +338,10 @@ proxy never crashes on a bad config.
   contract suite (`tests/test_contract_real_ty.py`) catches breakage when
   you bump ty.
 * **iommi graph requires iommi to be importable somewhere.** Either in
-  the same venv as `iommi-lsp`, or in the workspace's `.venv` / `venv`.
+  the same venv as `iommi_lsp`, or in the workspace's `.venv` / `venv`.
   Without that, the synthesised stubs cover the public iommi classes
   but project-specific subclasses (and their refinables) stay invisible
-  until you run `iommi-lsp graph build`.
+  until you run `iommi_lsp graph build`.
 * **No type-checker arbitrage.** This proxies one backend at a time; you
   still pick `ty` (or eventually `mypy` / `pyright` once those backends
   are wired in).

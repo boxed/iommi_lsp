@@ -1,4 +1,4 @@
-"""Tests for ``[tool.iommi-lsp]`` config loading and rule gating."""
+"""Tests for ``[tool.iommi_lsp]`` config loading and rule gating."""
 
 from __future__ import annotations
 
@@ -31,11 +31,11 @@ def test_no_iommi_lsp_section_returns_default(tmp_path: Path):
 
 def test_full_config_round_trip(tmp_path: Path):
     _write_pyproject(tmp_path, """
-        [tool.iommi-lsp]
+        [tool.iommi_lsp]
         enabled = true
         disabled_rules = ["pk", "reverse"]
 
-        [tool.iommi-lsp.extra_magic_attrs]
+        [tool.iommi_lsp.extra_magic_attrs]
         manager = ["mongo", "search"]
     """)
     c = load(tmp_path)
@@ -46,7 +46,7 @@ def test_full_config_round_trip(tmp_path: Path):
 
 def test_unknown_rule_in_disabled_is_ignored(tmp_path: Path, caplog):
     _write_pyproject(tmp_path, """
-        [tool.iommi-lsp]
+        [tool.iommi_lsp]
         disabled_rules = ["pk", "no_such_rule"]
     """)
     c = load(tmp_path)
@@ -195,7 +195,7 @@ def test_index_picks_up_config_from_pyproject(tmp_path: Path):
         "    name = models.CharField(max_length=80)\n"
     )
     _write_pyproject(tmp_path, """
-        [tool.iommi-lsp]
+        [tool.iommi_lsp]
         disabled_rules = ["manager"]
     """)
 

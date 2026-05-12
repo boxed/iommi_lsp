@@ -1,8 +1,8 @@
-"""``iommi-lsp graph build`` — produce the workspace's iommi graph.
+"""``iommi_lsp graph build`` — produce the workspace's iommi graph.
 
 Spawns a subprocess running ``python -m iommi_lsp.analyzers.iommi.reflect``
 and captures its JSON output. Defaulting to ``sys.executable`` works when
-iommi-lsp is installed in the same venv as iommi (the recommended setup).
+iommi_lsp is installed in the same venv as iommi (the recommended setup).
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def build_in_subprocess(
     install directory prepended to ``sys.path`` so it can be imported
     even when the target Python doesn't have iommi_lsp installed —
     the common case for `uv tool install`-style isolated installs of
-    iommi-lsp running against the user's project venv. The target
+    iommi_lsp running against the user's project venv. The target
     Python still needs iommi (and Django) on its own.
     """
     py = python or sys.executable
@@ -100,7 +100,7 @@ def build_for_workspace(
     python: str | None = None,
     seeds: list[str] | tuple[str, ...] = DEFAULT_SEEDS,
 ) -> Path:
-    """Build the graph and write it to ``<workspace>/.iommi-lsp-graph.json``."""
+    """Build the graph and write it to ``<workspace>/.iommi_lsp-graph.json``."""
     graph = build_in_subprocess(python=python, seeds=seeds)
     out_path = workspace_root / GRAPH_FILENAME
     save_graph(graph, out_path)

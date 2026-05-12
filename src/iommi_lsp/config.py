@@ -1,10 +1,10 @@
-"""Per-project configuration via ``[tool.iommi-lsp]`` in ``pyproject.toml``.
+"""Per-project configuration via ``[tool.iommi_lsp]`` in ``pyproject.toml``.
 
 Schema:
 
 .. code-block:: toml
 
-    [tool.iommi-lsp]
+    [tool.iommi_lsp]
     enabled = true                              # master switch
     disabled_rules = ["pk", "reverse"]           # skip these rule groups
     extra_magic_attrs = { manager = ["mongo"] }  # add to a group
@@ -86,7 +86,7 @@ def load(workspace_root: Path) -> Config:
         _log.warning("could not parse %s: %s; using defaults", pyproject, e)
         return DEFAULT
 
-    section = (data.get("tool") or {}).get("iommi-lsp")
+    section = (data.get("tool") or {}).get("iommi_lsp")
     if not isinstance(section, dict):
         return DEFAULT
 

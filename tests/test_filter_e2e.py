@@ -1,6 +1,6 @@
 """End-to-end test of the full filter pipeline.
 
-Drives the real ``iommi-lsp`` proxy with a stand-in backend that
+Drives the real ``iommi_lsp`` proxy with a stand-in backend that
 publishes synthetic diagnostics. Verifies that magic-attribute false
 positives are removed while genuine diagnostics survive.
 """

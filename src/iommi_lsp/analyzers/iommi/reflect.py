@@ -7,7 +7,7 @@ member_class is queued for its own pass, so the resulting graph is
 closed under refinable-following.
 
 This module is meant to be invoked from the *user's* venv via
-``iommi-lsp graph build`` so the graph reflects the iommi version they
+``iommi_lsp graph build`` so the graph reflects the iommi version they
 actually depend on, plus any subclasses they ship as installed packages.
 """
 
@@ -79,7 +79,7 @@ def bootstrap_django() -> None:
         DATABASES={
             "default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"},
         },
-        SECRET_KEY="iommi-lsp-graph-build",
+        SECRET_KEY="iommi_lsp-graph-build",
         ROOT_URLCONF=None,
         MIDDLEWARE=[],
     )
@@ -337,7 +337,7 @@ def build(seeds: list[str] | tuple[str, ...] = DEFAULT_SEEDS) -> IommiGraph:
 def main(argv: list[str] | None = None) -> int:
     """``python -m iommi_lsp.analyzers.iommi.reflect [--seeds a,b,c]``.
 
-    Used internally by ``iommi-lsp graph build`` when running the
+    Used internally by ``iommi_lsp graph build`` when running the
     reflector in a subprocess (so the user's venv supplies iommi).
     Output is the graph JSON on stdout.
     """

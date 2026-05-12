@@ -1,11 +1,11 @@
-"""``iommi-lsp`` entry point.
+"""``iommi_lsp`` entry point.
 
 Two modes:
 
 * No subcommand (default) — run as the LSP proxy on stdio. Spawns the
   bundled ``ty server`` (auto-detected next to our own interpreter)
   unless ``--ty-command`` overrides.
-* ``iommi-lsp index <path>`` — build the Django model index for *path*
+* ``iommi_lsp index <path>`` — build the Django model index for *path*
   and dump it to stdout. A debugging tool for milestone 3.
 """
 
@@ -37,7 +37,7 @@ _log = log.get("cli")
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="iommi-lsp",
+        prog="iommi_lsp",
         description="Wrapper LSP that proxies ty and filters Django/iommi false positives.",
     )
     p.add_argument(
@@ -62,7 +62,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--version",
         action="version",
-        version=f"iommi-lsp {__version__}",
+        version=f"iommi_lsp {__version__}",
     )
 
     sub = p.add_subparsers(dest="command", metavar="COMMAND")
@@ -79,7 +79,7 @@ def _build_parser() -> argparse.ArgumentParser:
     graph_sub = graph.add_subparsers(dest="graph_command", metavar="ACTION")
     g_build = graph_sub.add_parser(
         "build",
-        help="Reflect the installed iommi and write .iommi-lsp-graph.json.",
+        help="Reflect the installed iommi and write .iommi_lsp-graph.json.",
     )
     g_build.add_argument(
         "path",
@@ -105,7 +105,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _resolve_ty_binary() -> str:
     """Locate the ``ty`` executable to spawn.
 
-    Prefer the one shipped next to our own interpreter — when iommi-lsp
+    Prefer the one shipped next to our own interpreter — when iommi_lsp
     is installed as a uv tool / pipx app, ``ty`` lives in the same
     ``bin/`` directory as ``sys.executable`` because we declare it as a
     hard dependency. Fall back to ``PATH``, then to the bare name (lets
@@ -212,11 +212,11 @@ def _backend_env(
 
     1. ``VIRTUAL_ENV`` (and ``PATH``) is set to the workspace's ``.venv``
        (or ``venv``) when present and the parent env doesn't already have
-       a valid ``VIRTUAL_ENV``. Editors that launch iommi-lsp via wrapper
+       a valid ``VIRTUAL_ENV``. Editors that launch iommi_lsp via wrapper
        scripts (uv tool, pipx) often strip or overwrite ``VIRTUAL_ENV``,
        leaving ty unable to find the workspace's installed packages.
     2. The directory holding this Python interpreter is *appended* to
-       ``PATH``. When iommi-lsp is installed as a uv tool, the bundled
+       ``PATH``. When iommi_lsp is installed as a uv tool, the bundled
        ``ty`` lives next to ``sys.executable`` but isn't on the editor's
        PATH; this lets us find it as a last resort.
     """
@@ -281,7 +281,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "graph":
             if args.graph_command == "build":
                 return _run_graph_build(args.path, args.python, args.seeds)
-            print("usage: iommi-lsp graph build [path]", file=sys.stderr)
+            print("usage: iommi_lsp graph build [path]", file=sys.stderr)
             return 2
         return _run_proxy(args.ty_command, args.workspace)
     except KeyboardInterrupt:

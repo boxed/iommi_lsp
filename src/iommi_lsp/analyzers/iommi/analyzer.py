@@ -1,7 +1,7 @@
 """IommiAnalyzer — adds diagnostics for invalid ``Class(kw__chain=...)``.
 
-Loads the workspace's ``.iommi-lsp-graph.json`` (produced by
-``iommi-lsp graph build``) and validates each call whose callee is a
+Loads the workspace's ``.iommi_lsp-graph.json`` (produced by
+``iommi_lsp graph build``) and validates each call whose callee is a
 known iommi class. The first dead-end segment in a flattened kwarg
 chain becomes a ``unknown-iommi-refinable`` diagnostic at that
 segment's source range.
@@ -40,7 +40,7 @@ _log = log.get("iommi.analyzer")
 
 
 _IOMMI_DIAG_CODE = "iommi-unknown-refinable"
-_IOMMI_DIAG_SOURCE = "iommi-lsp"
+_IOMMI_DIAG_SOURCE = "iommi_lsp"
 
 
 @dataclass
@@ -94,7 +94,7 @@ class IommiAnalyzer:
             return
 
         # No graph on disk. Try to build one — first in-process (free
-        # when iommi-lsp shares a venv with iommi), then fall back to
+        # when iommi_lsp shares a venv with iommi), then fall back to
         # synthesized stubs for the well-known iommi classes. Each step
         # logs its outcome so the user can see exactly what went wrong.
         if self._auto_build:
@@ -137,7 +137,7 @@ class IommiAnalyzer:
         patch the buffer with a marker keyword so an in-progress call
         parses, then walk the graph to find what valid sub-segments are.
 
-        Works even when no ``.iommi-lsp-graph.json`` has been built —
+        Works even when no ``.iommi_lsp-graph.json`` has been built —
         the well-known iommi classes (Table/Form/Page/Query) carry a
         hardcoded stub so ``Table(auto__...)`` and ``Table(columns__...)``
         still get exclusive iommi completions and ty's variable noise
@@ -207,7 +207,7 @@ class IommiAnalyzer:
             # No graph data (yet) — fall back to a hardcoded stub for
             # the well-known iommi classes. This keeps `Table(auto__...)`
             # and friends exclusive even before the user runs
-            # ``iommi-lsp graph build``.
+            # ``iommi_lsp graph build``.
             cls = _synthesize_iommi_class(cls_qualname)
         if cls is None:
             return empty
@@ -294,7 +294,7 @@ class IommiAnalyzer:
                 "insertText": name,
                 "detail": f"auto field ({fi.field_type}) on {auto_model.qualname}",
                 "data": {
-                    "source": "iommi-lsp.iommi-auto-field",
+                    "source": "iommi_lsp.iommi-auto-field",
                     "class": cls.qualname,
                     "model": auto_model.qualname,
                     "kwarg": kw_arg,
@@ -396,12 +396,12 @@ def _try_build_graph(graph_path: Path) -> IommiGraph | None:
     Strategy (each step logs detailed reasons on failure):
 
     1. **In-process build.** If ``iommi`` is importable in this Python
-       process — i.e. iommi-lsp shares a venv with iommi — reflect
+       process — i.e. iommi_lsp shares a venv with iommi — reflect
        directly. This is the cheap path and the one we recommend (install
-       iommi-lsp with ``uv tool install --with iommi iommi-lsp`` or in
+       iommi_lsp with ``uv tool install --with iommi iommi_lsp`` or in
        the same venv as the project).
     2. **Project-venv subprocess.** Look for ``.venv/bin/python`` /
-       ``venv/bin/python`` under the workspace and try ``iommi-lsp graph
+       ``venv/bin/python`` under the workspace and try ``iommi_lsp graph
        build`` against that interpreter. Requires ``iommi_lsp`` to be
        installed there too.
 
@@ -425,10 +425,10 @@ def _try_build_graph(graph_path: Path) -> IommiGraph | None:
     _log.warning(
         "could not build iommi graph automatically. To get full iommi "
         "completions:\n"
-        "  - install iommi alongside iommi-lsp: `uv tool install --with iommi --force iommi-lsp`, OR\n"
-        "  - run `iommi-lsp graph build --python <path-to-project-venv-python>` once "
+        "  - install iommi alongside iommi_lsp: `uv tool install --with iommi --force iommi_lsp`, OR\n"
+        "  - run `iommi_lsp graph build --python <path-to-project-venv-python>` once "
         "from the project root, OR\n"
-        "  - install `iommi-lsp` in the project venv and run `iommi-lsp graph build` from there."
+        "  - install `iommi_lsp` in the project venv and run `iommi_lsp graph build` from there."
     )
     return None
 
@@ -439,7 +439,7 @@ def _try_inline_build(graph_path: Path) -> IommiGraph | None:
     except ImportError as e:
         _log.info(
             "in-process build skipped: iommi not importable here (%s). "
-            "iommi-lsp's tool venv usually doesn't include iommi.", e,
+            "iommi_lsp's tool venv usually doesn't include iommi.", e,
         )
         return None
     iommi_version = getattr(_iommi, "__version__", "?")
@@ -807,7 +807,7 @@ _AUTO_KNOWN_KEYS: tuple[str, ...] = (
 
 # Well-known iommi classes that accept ``auto__model`` and have a members
 # refinable. Used to synthesise a stub when the user hasn't run
-# ``iommi-lsp graph build`` yet — the canonical shape is stable across
+# ``iommi_lsp graph build`` yet — the canonical shape is stable across
 # iommi releases, so we can offer ``auto__`` + members completion
 # without graph data.
 _IOMMI_AUTO_BINDABLE_CLASSES: dict[str, str] = {
@@ -1079,7 +1079,7 @@ def _refinable_item(
         "kind": 5,
         "insertText": insert,
         "detail": _refinable_detail(ref),
-        "data": {"source": "iommi-lsp.iommi-kwarg", "class": cls_qualname},
+        "data": {"source": "iommi_lsp.iommi-kwarg", "class": cls_qualname},
     }
 
 
@@ -1094,14 +1094,14 @@ def _namespace_key_item(key: str, cls_qualname: str, *, prefix: str) -> dict:
             "kind": 5,
             "insertText": f"{full}__",
             "detail": "html attrs",
-            "data": {"source": "iommi-lsp.iommi-kwarg", "class": cls_qualname},
+            "data": {"source": "iommi_lsp.iommi-kwarg", "class": cls_qualname},
         }
     return {
         "label": full,
         "kind": 5,
         "insertText": f"{full}=",
         "detail": "namespace key",
-        "data": {"source": "iommi-lsp.iommi-kwarg", "class": cls_qualname},
+        "data": {"source": "iommi_lsp.iommi-kwarg", "class": cls_qualname},
     }
 
 
@@ -1113,7 +1113,7 @@ def _init_member_item(name: str, cls_qualname: str, *, prefix: str) -> dict:
         "kind": 5,
         "insertText": f"{full}=",
         "detail": f"{cls_qualname}.__init__ attribute",
-        "data": {"source": "iommi-lsp.iommi-kwarg", "class": cls_qualname},
+        "data": {"source": "iommi_lsp.iommi-kwarg", "class": cls_qualname},
     }
 
 
@@ -1126,7 +1126,7 @@ def _html_attrs_item(name: str, cls_qualname: str, *, prefix: str) -> dict:
         "kind": 5,
         "insertText": f"{full}__",
         "detail": detail,
-        "data": {"source": "iommi-lsp.iommi-kwarg", "class": cls_qualname},
+        "data": {"source": "iommi_lsp.iommi-kwarg", "class": cls_qualname},
     }
 
 
@@ -1149,7 +1149,7 @@ def _model_field_items(
             "insertText": f"{full}__",
             "detail": f"auto-bound {fi.field_type} on {model.qualname}",
             "data": {
-                "source": "iommi-lsp.iommi-kwarg-auto",
+                "source": "iommi_lsp.iommi-kwarg-auto",
                 "class": cls_qualname,
                 "model": model.qualname,
             },

@@ -1,7 +1,7 @@
 """Schema + load/save for the iommi reflection graph.
 
-The graph is generated once per project by ``iommi-lsp graph build`` (which
-imports iommi from the user's venv) and dumped to ``.iommi-lsp-graph.json``
+The graph is generated once per project by ``iommi_lsp graph build`` (which
+imports iommi from the user's venv) and dumped to ``.iommi_lsp-graph.json``
 in the workspace root. The LSP loads it at startup and uses it to validate
 ``Class(kw__chain=...)`` calls against iommi's refinable hierarchy.
 
@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-GRAPH_FILENAME = ".iommi-lsp-graph.json"
+GRAPH_FILENAME = ".iommi_lsp-graph.json"
 # Bumped when the on-disk shape changes in a way that older readers
 # couldn't validate against. ``load_graph`` treats lower versions as
 # missing so the analyzer rebuilds them in-place.

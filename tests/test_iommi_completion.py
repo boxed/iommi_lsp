@@ -310,7 +310,7 @@ def test_module_qualified_call(analyzer, tmp_path):
 
 
 def test_no_graph_still_recognizes_iommi_classes(tmp_path):
-    # Without `iommi-lsp graph build`, we still synthesise a stub for
+    # Without `iommi_lsp graph build`, we still synthesise a stub for
     # the well-known iommi classes so the user gets exclusive completions
     # and ty's variable noise stays out.
     a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)

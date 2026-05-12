@@ -2,7 +2,7 @@
 
 These are parsed by the regular AST scrape pipeline (one source string
 per Django module, given a synthetic file path under
-``<workspace>/.iommi-lsp-builtins/`` so qualname computation works) and
+``<workspace>/.iommi_lsp-builtins/`` so qualname computation works) and
 folded into the workspace index. The result: ``User.objects.filter(
 email='x')`` resolves even when the user never declares a ``User``
 model — the common case where the project uses

@@ -1,4 +1,4 @@
-# iommi-lsp — Design Document
+# iommi_lsp — Design Document
 
 A wrapper Language Server that proxies [`ty`](https://github.com/astral-sh/ty)
 and filters out false-positive diagnostics caused by Django's metaclass magic.
@@ -33,7 +33,7 @@ filtered through framework-aware analyzers, and forwarded.
 
 ```
             ┌────────┐  LSP  ┌──────────────┐  LSP  ┌────────┐
-   editor ──┤ client ├───────┤  iommi-lsp   ├───────┤   ty   │
+   editor ──┤ client ├───────┤  iommi_lsp   ├───────┤   ty   │
             └────────┘       │   (proxy)    │       └────────┘
                              │              │
                              │  ┌────────┐  │
@@ -59,7 +59,7 @@ filtered through framework-aware analyzers, and forwarded.
 ### 3.1 Components
 
 ```
-iommi-lsp
+iommi_lsp
 ├── proxy        — JSON-RPC framing, subprocess plumbing, message pumping
 ├── interceptor  — picks messages to inspect/rewrite (just diagnostics in v1)
 ├── analyzers/
@@ -125,14 +125,14 @@ suite (see §7).
 ## 5. Project layout
 
 ```
-iommi-lsp/
+iommi_lsp/
 ├── pyproject.toml
 ├── README.md
 ├── DESIGN.md                       # this file
 ├── src/iommi_lsp/
 │   ├── __init__.py
 │   ├── __main__.py                 # `python -m iommi_lsp`
-│   ├── cli.py                      # entry point: `iommi-lsp`
+│   ├── cli.py                      # entry point: `iommi_lsp`
 │   ├── proxy.py                    # main proxy server
 │   ├── jsonrpc.py                  # Content-Length framing
 │   ├── interceptor.py              # diagnostic filtering pipeline
@@ -222,7 +222,7 @@ A directory of `.py` fixtures, each annotated with expected post-filter
 diagnostics. The test harness:
 
 1. Boots the real `ty server` as a subprocess.
-2. Boots `iommi-lsp` pointing at the fixture directory.
+2. Boots `iommi_lsp` pointing at the fixture directory.
 3. Sends `didOpen` for each fixture.
 4. Collects published diagnostics.
 5. Compares against expected.
@@ -235,16 +235,16 @@ fail.
 
 Each milestone ends in a working, demoable artifact. Implement in order.
 
-1. **Skeleton + echo proxy.** `pyproject.toml`, package structure, `iommi-lsp`
+1. **Skeleton + echo proxy.** `pyproject.toml`, package structure, `iommi_lsp`
    entry point. Spawns `ty server`, pumps JSON-RPC both directions verbatim.
-   Demo: editor connects via `iommi-lsp`, behaves identically to direct ty.
+   Demo: editor connects via `iommi_lsp`, behaves identically to direct ty.
 
 2. **Diagnostic interception.** Parse `textDocument/publishDiagnostics`,
    log to stderr, forward unchanged. Confirms we can read structured
    diagnostics without breaking the protocol.
 
 3. **Django model index.** AST scan of workspace, builds `DjangoIndex`.
-   Standalone CLI for debugging: `iommi-lsp index <path>` prints the index.
+   Standalone CLI for debugging: `iommi_lsp index <path>` prints the index.
    No proxy integration yet.
 
 4. **Magic-attribute filter.** Wire the index into the interceptor. Drop
@@ -260,8 +260,8 @@ Each milestone ends in a working, demoable artifact. Implement in order.
 7. **File-change handling.** `didChange`/`didSave` updates the index
    incrementally.
 
-8. **Packaging + release.** Publish to PyPI as `iommi-lsp`, runnable via
-   `uvx iommi-lsp`. README with editor-config snippets for Neovim, Helix,
+8. **Packaging + release.** Publish to PyPI as `iommi_lsp`, runnable via
+   `uvx iommi_lsp`. README with editor-config snippets for Neovim, Helix,
    Zed, VS Code.
 
 ## 9. Future (out of scope for v1)
@@ -274,7 +274,7 @@ Each milestone ends in a working, demoable artifact. Implement in order.
   Django-specific diagnostics (e.g. unknown field names in `.filter()`),
   code actions ("add `if TYPE_CHECKING: ...`").
 - **Other backends.** Allow proxying mypy or pyright in place of ty.
-- **Configuration file.** `pyproject.toml`'s `[tool.iommi-lsp]` for
+- **Configuration file.** `pyproject.toml`'s `[tool.iommi_lsp]` for
   per-project overrides — disabled rules, custom magic attrs, etc.
 
 ## 10. Caveats and explicit non-goals
@@ -305,7 +305,7 @@ Recommended first session:
 1. Skim §§1–3 for context.
 2. Implement milestone 1 (skeleton + echo proxy) end to end.
 3. Write a single integration test that confirms a real editor (or
-   `lsp-devtools` proxy) sees identical behavior with iommi-lsp vs.
+   `lsp-devtools` proxy) sees identical behavior with iommi_lsp vs.
    direct ty.
 4. Stop, commit, demo.
 5. Then milestone 2.

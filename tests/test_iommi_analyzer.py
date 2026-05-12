@@ -107,7 +107,7 @@ def test_unknown_top_level_kwarg(workspace: Path):
     assert len(diags) == 1
     d = diags[0]
     assert d["code"] == "iommi-unknown-refinable"
-    assert d["source"] == "iommi-lsp"
+    assert d["source"] == "iommi_lsp"
     assert "bogus_thing" in d["message"]
     # Range pinned to the kwarg name.
     src = (workspace / "usage.py").read_text()

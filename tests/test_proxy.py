@@ -1,6 +1,6 @@
 """End-to-end echo-proxy test.
 
-Spawns ``iommi-lsp`` as a subprocess against a tiny ``fake_ty.py`` backend,
+Spawns ``iommi_lsp`` as a subprocess against a tiny ``fake_ty.py`` backend,
 writes LSP frames into the proxy's stdin, and reads them back from stdout.
 This is the smoke test that proves the bidirectional pump works.
 """

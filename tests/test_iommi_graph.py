@@ -72,7 +72,7 @@ def test_load_rejects_older_schema_version(tmp_path: Path):
     """Older schemas (v1) lack ``traditional_class`` / ``init_members``.
     Loading must return None so the analyzer's index step rebuilds the
     graph — otherwise stale on-disk graphs silently produce wrong
-    diagnostics for users who upgrade iommi-lsp without rebuilding."""
+    diagnostics for users who upgrade iommi_lsp without rebuilding."""
     f = tmp_path / "old.json"
     f.write_text(json.dumps({
         "schema_version": 1,

@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "iommi-lsp"
+name = "iommi_lsp"
 version = "0.0.1"
 description = "Wrapper LSP that proxies ty and filters Django/iommi false-positive diagnostics."
 readme = "README.md"
@@ -23,7 +23,7 @@ dev = [
 ]
 
 [project.scripts]
-iommi-lsp = "iommi_lsp.cli:main"
+iommi_lsp = "iommi_lsp.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/iommi_lsp"]
