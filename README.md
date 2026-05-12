@@ -1,7 +1,7 @@
 # iommi-lsp
 
-A wrapper Language Server that proxies [`ty`](https://github.com/astral-sh/ty)
-and adds the Django- and iommi-awareness ty can't have on its own.
+A Django and iommi language server that proxies to
+[`ty`](https://github.com/astral-sh/ty) for broad Python support.
 
 ## What you get
 
