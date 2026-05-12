@@ -1,18 +1,69 @@
 # iommi-lsp
 
 A wrapper Language Server that proxies [`ty`](https://github.com/astral-sh/ty)
-and filters out the ``unresolved-attribute`` false positives that Django's
-metaclass magic produces — `Item.objects`, `Item._meta`, `item.pk`, reverse
-relations, FK `_id` accessors, etc. The genuine bugs survive.
+and adds the Django- and iommi-awareness ty can't have on its own.
 
-It speaks plain LSP, runs on stdio, and is configured into your editor in
-place of `ty server`. See [DESIGN.md](DESIGN.md) for the architecture.
+## What you get
+
+### Django
+
+* **Real autocomplete for ORM kwargs.** Inside `User.objects.filter(|`,
+  `.exclude(|`, `.get(|`, `.update(|`, `.create(|`, `.get_or_create(|`,
+  `.update_or_create(|` you get the model's queryable names — declared
+  fields, FK `_id` accessors, `pk`, reverse-relation accessors —
+  with `__`-traversal into related models. Suggestions insert as
+  `name=` so the caret lands at the value. At a recognised call site
+  we claim **exclusivity**, so ty's "any local variable near `em`"
+  noise stays out of the list.
+* **Typo diagnostics ty can't see.** `django-unknown-orm-lookup`
+  warnings fire on kwargs and string field paths that don't resolve
+  against the workspace model index. Covers `.filter(...)` /
+  `.exclude(...)` / `.get(...)` and friends, `order_by` / `values` /
+  `values_list` / `only` / `defer` / `distinct` / `select_related` /
+  `prefetch_related` strings, `Q(...)` / `F('...')` expressions —
+  full `__`-traversal through relations and reverse relations.
+* **No more `Item.objects` false positives.** ty's
+  `unresolved-attribute` diagnostics on Django metaclass magic
+  (`objects`, `_meta`, `pk`/`id`, `<fk>_id`, reverse relations,
+  `DoesNotExist`, …) are dropped before they reach the editor. Real
+  bugs survive.
+* **Built-in models + abstract inheritance.** `django.contrib.auth`
+  / `contenttypes` / `sessions` models are stubbed so they work out
+  of the box, and abstract-base fields propagate to concrete
+  subclasses (so a custom `User(AbstractUser)` resolves `email` /
+  `username` / etc.).
+
+### iommi
+
+* **Refinable autocomplete inside `Class(kw__chain=...)` calls.**
+  `Table(c|` suggests `columns__`, `cell__`, `query__`, …;
+  containers get a trailing `__` and scalars get `=`. Chains walk
+  the iommi refinable graph, so `Table(columns__name__|` offers
+  the configurable surface of `Column`.
+* **`auto__` namespace.** Always surfaces `model` / `rows` /
+  `instance` / `include` / `exclude` whether or not the graph
+  reflects it, since iommi's default `Namespace()` is empty.
+* **Django field bridging.** `Table(auto__model=User, columns__|)`
+  suggests `User`'s fields (insert as `username__`, `email__`, …
+  so you can keep configuring the auto-generated column). The same
+  works inside `auto__include=['|']` / `auto__exclude=['|']` string
+  literals.
+* **`iommi-unknown-refinable` diagnostics.** Invalid chains in
+  `Class(kw__chain=...)` calls flag the first dead-end segment.
+* **Zero-setup defaults.** Synthesised stubs cover the public iommi
+  classes (`Table`, `Form`, `Query`, `Page`) so all of the above
+  works before any graph build succeeds; the project's own iommi
+  subclasses light up once a real graph is built (automatically, in
+  most setups — see below).
+
+It speaks plain LSP, runs on stdio, and is configured into your editor
+in place of `ty server`. See [DESIGN.md](DESIGN.md) for the
+architecture.
 
 ## Status
 
-Pre-1.0. v1 ships the Django filter; the iommi-specific layer comes after.
-Pinned against a narrow ty range — bumps are gated by a contract test
-suite (`tests/test_contract_real_ty.py`).
+Pre-1.0. Pinned against a narrow ty range — bumps are gated by a
+contract test suite (`tests/test_contract_real_ty.py`).
 
 ## Install
 
@@ -33,11 +84,21 @@ iommi-lsp index ./myproject                  # dump the Django model index and e
 iommi-lsp graph build ./myproject            # reflect installed iommi -> .iommi-lsp-graph.json
 ```
 
-**For the iommi analyzer**, run `iommi-lsp graph build` once after installing
-or upgrading iommi in your project. The reflector imports iommi from the
-same Python interpreter that runs `iommi-lsp` (i.e. install both in your
-project's venv). The graph is a few hundred KB JSON in your workspace
-root; check it in or `.gitignore` it as you prefer.
+**For the iommi analyzer**, the graph at `.iommi-lsp-graph.json` is built
+automatically when the workspace is opened:
+
+1. **In-process** if `iommi` is importable from `iommi-lsp`'s interpreter
+   (i.e. installed alongside it: `uv tool install --with iommi iommi-lsp`).
+2. **Subprocess** against the workspace's `.venv` / `venv` Python, when
+   `iommi-lsp` is installed there too.
+3. **Synthesized stubs** for the well-known iommi classes (`Table`,
+   `Form`, `Query`, `Page`) as a last resort — enough that `auto__…` and
+   members-name completion still work before any graph build succeeds.
+
+Running `iommi-lsp graph build` by hand is still supported and is the
+fastest way to force a rebuild after upgrading iommi. The graph is a few
+hundred KB JSON in your workspace root; check it in or `.gitignore` it
+as you prefer.
 
 `iommi-lsp` writes diagnostics-side stderr logs; tune via
 `IOMMI_LSP_LOG=DEBUG` or `--log-level DEBUG`.
@@ -101,19 +162,24 @@ pattern: install a generic LSP-client extension and point it at
 
 ## How the iommi analyzer works
 
-`iommi-lsp graph build` imports iommi in your venv and walks each
-`Refinable`-declaring class (`Table`, `Column`, `Form`, `Field`, …)
-transitively through `class_ref` and `members` edges. Every refinable
-gets one of six kinds:
+`iommi-lsp graph build` (or the auto-build at startup) imports iommi
+in your venv and walks each `Refinable`-declaring class (`Table`,
+`Column`, `Form`, `Field`, …) transitively through `class_ref` and
+`members` edges. Every refinable gets one of these kinds:
 
 * `members` — open dict of typed values (`columns: Dict[str, Column]`)
 * `html_attrs` — the `attrs` special with `class` (str→bool) and `style`
   (str→str) sub-namespaces
 * `class_ref` — chain steps into another refinable class (annotation
   wins over runtime default, so `bulk: Optional[Form]` resolves to Form)
-* `namespace` — structured with known sub-keys
-* `open_namespace` — anything goes
-* `evaluated_scalar` / `scalar` — leaf
+* `traditional_class` — steps into a non-refinable class whose
+  configurable surface is its `__init__`'s `self.X = …` assignments
+  (e.g. `Column.cell` / `Table.cell` configuring a `Cell` instance)
+* `namespace` — structured with a small set of known sub-keys
+* `open_namespace` — empty Namespace default; any keys allowed
+* `evaluated_scalar` / `scalar` — leaf; chain ends here
+
+### Diagnostics
 
 At LSP time the analyzer finds every `Class(kw__chain=...)` call, splits
 the kwarg name on `__`, and walks the chain through the graph. Dead
@@ -121,6 +187,29 @@ ends become `iommi-unknown-refinable` warnings pinned to the offending
 segment. Bias is toward false negatives — if anything is ambiguous
 (unknown root class, member with no typed value, custom user subclass
 not in the graph), we pass silently.
+
+### Completions
+
+At a recognised iommi-call kwarg position the LSP claims **exclusivity**:
+ty's free-form variable suggestions are dropped so you only see real
+refinables. Three flavours of completion fire from the same position:
+
+* **Refinable names** — `Table(c|` suggests `columns__`, `cell__`,
+  `query__`, … with container refinables getting a trailing `__` and
+  scalars getting `=`.
+* **`auto__` namespace** — synthesised as a known namespace with
+  `model` / `rows` / `instance` / `include` / `exclude`, even when the
+  reflected graph records `auto` as an open namespace.
+* **Django field names** inside `auto__include=[...]` /
+  `auto__exclude=[...]` string literals, and after `columns__` /
+  `fields__` / `filters__` / `parts__` when the call carries
+  `auto__model=Model` (or `auto__rows=Model.objects.…`). This is the
+  bridge that turns `Table(auto__model=User, columns__|)` into a
+  member-name list drawn from the `User` model's fields.
+
+Synthesised stubs cover `Table`, `Form`, `Query`, and `Page` so the
+above all works before `iommi-lsp graph build` ever succeeds; the
+project's own iommi subclasses light up once a real graph is available.
 
 ## How the Django filter works
 
@@ -247,7 +336,11 @@ proxy never crashes on a bad config.
 * **Pre-1.0 ty.** Diagnostic codes and message text *will* change. The
   contract suite (`tests/test_contract_real_ty.py`) catches breakage when
   you bump ty.
-* **No iommi awareness yet.** Coming after Django filtering stabilizes.
+* **iommi graph requires iommi to be importable somewhere.** Either in
+  the same venv as `iommi-lsp`, or in the workspace's `.venv` / `venv`.
+  Without that, the synthesised stubs cover the public iommi classes
+  but project-specific subclasses (and their refinables) stay invisible
+  until you run `iommi-lsp graph build`.
 * **No type-checker arbitrage.** This proxies one backend at a time; you
   still pick `ty` (or eventually `mypy` / `pyright` once those backends
   are wired in).
