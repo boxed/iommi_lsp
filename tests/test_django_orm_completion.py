@@ -281,6 +281,87 @@ def test_completion_multi_hop_fk_chain(analyzer_blog, tmp_path):
     assert "article__author__name" in labels
 
 
+def test_fk_id_completion_on_class_attribute(analyzer_basic, tmp_path):
+    """`Profile.<cursor>` — suggest `user_id` (the FK underlying column)."""
+    uri, pos = _write_with_cursor(
+        tmp_path, "from myapp.models import Profile\nProfile."
+    )
+    result = analyzer_basic.completions(uri, pos)
+    assert result.exclusive is False
+    labels = _labels(result)
+    assert "user_id" in labels
+    item = next(it for it in result.items if it["label"] == "user_id")
+    assert item["insertText"] == "user_id"
+    assert item["kind"] == 5
+
+
+def test_fk_id_completion_partial_prefix_filters(analyzer_basic, tmp_path):
+    """`Profile.us<cursor>` — partial `us` matches `user_id`."""
+    uri, pos = _write_with_cursor(
+        tmp_path, "from myapp.models import Profile\nProfile.us"
+    )
+    result = analyzer_basic.completions(uri, pos)
+    assert "user_id" in _labels(result)
+
+
+def test_fk_id_completion_non_matching_partial_silent(analyzer_basic, tmp_path):
+    """`Profile.bog<cursor>` — partial doesn't match any fk_id; empty."""
+    uri, pos = _write_with_cursor(
+        tmp_path, "from myapp.models import Profile\nProfile.bog"
+    )
+    result = analyzer_basic.completions(uri, pos)
+    assert _labels(result) == []
+    assert result.exclusive is False
+
+
+def test_fk_id_completion_on_annotated_param(analyzer_basic, tmp_path):
+    """`def f(p: Profile): p.<cursor>` — annotation-resolved receiver."""
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from myapp.models import Profile\n"
+        "def f(p: Profile):\n"
+        "    return p.",
+    )
+    result = analyzer_basic.completions(uri, pos)
+    assert "user_id" in _labels(result)
+
+
+def test_fk_id_completion_on_self_in_model_method(tmp_path):
+    """`self.<cursor>` inside a Profile method."""
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from django.db import models\n"
+        "from myapp.models import User\n"
+        "class Profile(models.Model):\n"
+        "    user = models.ForeignKey(User, on_delete=models.CASCADE)\n"
+        "    def f(self):\n"
+        "        return self.",
+    )
+    result = a.completions(uri, pos)
+    assert "user_id" in _labels(result)
+
+
+def test_fk_id_completion_unknown_receiver_silent(analyzer_basic, tmp_path):
+    """Receiver doesn't resolve to any model — emit nothing."""
+    uri, pos = _write_with_cursor(
+        tmp_path, "def f(qs):\n    qs."
+    )
+    result = analyzer_basic.completions(uri, pos)
+    assert _labels(result) == []
+    assert result.exclusive is False
+
+
+def test_fk_id_completion_no_dot_silent(analyzer_basic, tmp_path):
+    """Cursor not preceded by a dot — not an attribute access."""
+    uri, pos = _write_with_cursor(
+        tmp_path, "from myapp.models import Profile\nProfile"
+    )
+    result = analyzer_basic.completions(uri, pos)
+    assert _labels(result) == []
+
+
 def test_completion_text_provider_used(analyzer_basic, tmp_path):
     # Disk has a closed call; live buffer has the partial.
     src_path = tmp_path / "u.py"

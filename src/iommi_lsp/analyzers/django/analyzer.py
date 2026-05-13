@@ -435,21 +435,23 @@ class DjangoAnalyzer:
             return []
 
     def completions(self, uri: str, position: dict) -> CompletionResult:
-        """Return LSP ``CompletionItem`` dicts for an ORM-lookup kwarg.
+        """Return LSP ``CompletionItem`` dicts for Django-aware positions.
 
-        Triggers when the cursor sits inside ``Model.objects.<method>(...)``
-        at a position that could be the start of a kwarg name (the same
-        method set we validate, ``filter``/``exclude``/``get``/``update``/
-        ``create``/``get_or_create``/``update_or_create``). On a
-        recognised position the result is *exclusive*: ty's name-of-any-
-        variable completions are noise here, so the matchmaker drops
-        them. On any uncertainty about the call site or the receiver
-        model, we return an empty non-exclusive result and let ty's
-        completions through.
+        Two kinds of completion:
+
+        * **ORM-lookup kwargs** — cursor inside
+          ``Model.objects.<method>(...)`` at a kwarg slot. Result is
+          *exclusive*: ty's name-of-any-variable completions are noise
+          there.
+        * **FK ``_id`` accessors** on attribute access — cursor after
+          ``<receiver>.`` where the receiver resolves to a Django model.
+          Result is *non-exclusive*: we augment ty's items with the
+          ``<field>_id`` accessors it doesn't know about.
+
+        On any uncertainty we return an empty non-exclusive result and
+        let ty's completions through.
         """
         empty = CompletionResult()
-        if not self.config.is_rule_enabled("orm_lookup"):
-            return empty
         if not self.django_index.models:
             return empty
         path = _uri_to_path(uri)
@@ -459,7 +461,13 @@ class DjangoAnalyzer:
         if source is None:
             return empty
         try:
-            return self._scan_completions(source, position)
+            if self.config.is_rule_enabled("orm_lookup"):
+                result = self._scan_completions(source, position)
+                if result.items or result.exclusive:
+                    return result
+            if self.config.is_rule_enabled("fk_id"):
+                return self._scan_fk_id_completions(source, position)
+            return empty
         except Exception:
             _log.exception("completion scanner crashed; emitting nothing")
             return empty
@@ -535,6 +543,76 @@ class DjangoAnalyzer:
                 self.django_index, model, partial
             ))
         return CompletionResult(items=items, exclusive=True)
+
+    def _scan_fk_id_completions(
+        self, source: str, position: dict
+    ) -> CompletionResult:
+        """Suggest ``<field>_id`` accessors after ``<receiver>.``.
+
+        Non-exclusive: ty handles the rest of the attribute completion
+        (real fields, methods, etc.); we only contribute the FK
+        underlying-column accessors that ty doesn't know about.
+        """
+        empty = CompletionResult()
+        line = int(position.get("line", 0))
+        character = int(position.get("character", 0))
+        offset = _offset_from_lsp_position(source, line, character)
+        if offset > len(source):
+            return empty
+
+        partial_start = offset
+        while partial_start > 0 and (
+            source[partial_start - 1].isalnum()
+            or source[partial_start - 1] == "_"
+        ):
+            partial_start -= 1
+        if partial_start == 0 or source[partial_start - 1] != ".":
+            return empty
+        partial = source[partial_start:offset]
+
+        # Walk forward over identifier chars too, so a cursor in the
+        # middle of `user_id` (`p.us|er_id`) replaces the whole token.
+        forward_end = offset
+        while forward_end < len(source) and (
+            source[forward_end].isalnum()
+            or source[forward_end] == "_"
+        ):
+            forward_end += 1
+
+        marker = "__iommi_lsp_fk_id_marker__"
+        patched = source[:partial_start] + marker + source[forward_end:]
+
+        try:
+            tree = ast.parse(patched)
+        except SyntaxError:
+            return empty
+
+        target: ast.Attribute | None = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == marker:
+                target = node
+                break
+        if target is None:
+            return empty
+
+        model = self._resolve_receiver_model(target.value, tree)
+        if model is None:
+            model = self._resolve_via_annotation(target.value, tree)
+        if model is None:
+            return empty
+
+        items: list[dict] = []
+        for name in sorted(model.fk_id_accessors):
+            if partial and not name.startswith(partial):
+                continue
+            items.append({
+                "label": name,
+                "kind": 5,  # CompletionItemKind.Field
+                "insertText": name,
+                "detail": "FK underlying-column accessor",
+                "data": {"source": "iommi_lsp.fk-id", "model": model.qualname},
+            })
+        return CompletionResult(items=items, exclusive=False)
 
     def _scan_lookups(self, parsed: _ParsedFile):
         for node in ast.walk(parsed.tree):
