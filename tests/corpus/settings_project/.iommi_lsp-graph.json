@@ -1,0 +1,1784 @@
+{
+  "classes": {
+    "iommi.action.Action": {
+      "bases": [
+        "iommi.fragment.Fragment",
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.action.Action",
+      "refinables": {
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "children": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "display_name": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "group": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "post_handler": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "tag": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.asset.Asset": {
+      "bases": [
+        "iommi.fragment.Fragment",
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.asset.Asset",
+      "refinables": {
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "children": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "in_body": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "tag": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.form.Field": {
+      "bases": [
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.form.Field",
+      "refinables": {
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "attr": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "choice_display_name_formatter": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "choice_id_formatter": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "choice_to_optgroup": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "choices": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "display_name": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "editable": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "empty_label": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "errors": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "group": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "help": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.fragment.Fragment"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "initial": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "input": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.fragment.Fragment"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "is_boolean": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "is_list": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "label": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.fragment.Fragment"
+        },
+        "model": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "model_field": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "model_field_name": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "non_editable_input": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.fragment.Fragment"
+        },
+        "parse_empty_string_as_none": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "parsed_data": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "raw_data": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "required": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "search_fields": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "strip_input": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "tag": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.form.Form": {
+      "bases": [
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.form.Form",
+      "refinables": {
+        "action_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.action.Action"
+        },
+        "actions": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "actions_template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "attr": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "auto": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.form.FormAutoConfig"
+        },
+        "editable": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "errors": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "field_group": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "fields": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "fields_template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "h_tag": {
+          "kind": "class_ref",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "target": "iommi.fragment.Fragment"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "instance": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "layout": {
+          "kind": "class_ref",
+          "refinable_type": "EvaluatedRefinable",
+          "target": "iommi.panel.Panel"
+        },
+        "layout_render_unused_fields": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "layout_template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "member_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.form.Field"
+        },
+        "model": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "page_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.page.Page"
+        },
+        "template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "title": {
+          "kind": "class_ref",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "target": "iommi.fragment.Fragment"
+        }
+      }
+    },
+    "iommi.form.FormAutoConfig": {
+      "bases": [
+        "iommi.from_model.AutoConfig",
+        "iommi.refinable.RefinableObject"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.form.FormAutoConfig",
+      "refinables": {
+        "default_included": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "exclude": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "instance": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "model": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "type": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        }
+      }
+    },
+    "iommi.fragment.Fragment": {
+      "bases": [
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.fragment.Fragment",
+      "refinables": {
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "children": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "tag": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.menu.Menu": {
+      "bases": [
+        "iommi.menu.MenuBase",
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.menu.Menu",
+      "refinables": {
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "items_container": {
+          "kind": "namespace",
+          "known_keys": [
+            "attrs",
+            "call_target"
+          ],
+          "refinable_type": "Refinable"
+        },
+        "sort": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "sub_menu": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "tag": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.menu.MenuItem": {
+      "bases": [
+        "iommi.menu.MenuBase",
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.menu.MenuItem",
+      "refinables": {
+        "a": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "active_class": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "active_class_on_item": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "display_name": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "group": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "regex": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "sort": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "sub_menu": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "tag": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "url": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.page.Page": {
+      "bases": [
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.page.Page",
+      "refinables": {
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "context": {
+          "kind": "open_namespace",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "h_tag": {
+          "kind": "class_ref",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "target": "iommi.fragment.Fragment"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "member_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.fragment.Fragment"
+        },
+        "parts": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "title": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.panel.Panel": {
+      "bases": [
+        "iommi.fragment.Fragment",
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.panel.Panel",
+      "refinables": {
+        "_parent_form": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "_parent_table": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "_parent_table_cells": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "children": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "col": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "col_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.panel.PanelCol"
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "fieldset_legend": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "nested_path": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "tag": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.panel.PanelCol": {
+      "bases": [
+        "iommi.fragment.Fragment",
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.panel.PanelCol",
+      "refinables": {
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "children": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "tag": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.query.Filter": {
+      "bases": [
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.query.Filter",
+      "refinables": {
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "attr": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "choices": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "field": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "freetext": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "is_valid_filter": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "model": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "model_field": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "model_field_name": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "pk_lookup_to_q": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "query_name": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "query_operator_for_field": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "search_fields": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "unary": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        }
+      }
+    },
+    "iommi.query.Query": {
+      "bases": [
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.query.Query",
+      "refinables": {
+        "advanced": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "auto": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.query.QueryAutoConfig"
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "filters": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "form": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "form_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.form.Form"
+        },
+        "form_container": {
+          "kind": "class_ref",
+          "refinable_type": "EvaluatedRefinable",
+          "target": "iommi.fragment.Fragment"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "member_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.query.Filter"
+        },
+        "model": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "rows": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "tag": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.query.QueryAutoConfig": {
+      "bases": [
+        "iommi.from_model.AutoConfig",
+        "iommi.refinable.RefinableObject"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.query.QueryAutoConfig",
+      "refinables": {
+        "default_included": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "exclude": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "model": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "rows": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        }
+      }
+    },
+    "iommi.table.Cell": {
+      "bases": [
+        "iommi.table.CellConfig",
+        "iommi.fragment.TransientFragment",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "attrs",
+        "cells",
+        "children",
+        "column",
+        "contents",
+        "format",
+        "iommi_style",
+        "link",
+        "parent",
+        "row",
+        "table",
+        "tag",
+        "template",
+        "url",
+        "url_title",
+        "value"
+      ],
+      "qualname": "iommi.table.Cell",
+      "refinables": {}
+    },
+    "iommi.table.Cells": {
+      "bases": [
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done",
+        "row",
+        "row_index"
+      ],
+      "qualname": "iommi.table.Cells",
+      "refinables": {
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "cell_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.table.Cell"
+        },
+        "extra": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "layout": {
+          "kind": "class_ref",
+          "refinable_type": "EvaluatedRefinable",
+          "target": "iommi.panel.Panel"
+        },
+        "tag": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.table.Column": {
+      "bases": [
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.table.Column",
+      "refinables": {
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "attr": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "auto_rowspan": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "bulk": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "cell": {
+          "kind": "traditional_class",
+          "refinable_type": "Refinable",
+          "target": "iommi.table.Cell"
+        },
+        "choices": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "data_retrieval_method": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "filter": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "group": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "header": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "model": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "model_field": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "model_field_name": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "render_column": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "row_group": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "sort_default_desc": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "sortable": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "superheader": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.table.RowConfig": {
+      "bases": [
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.table.RowConfig",
+      "refinables": {
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "extra": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "layout": {
+          "kind": "class_ref",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "target": "iommi.panel.Panel"
+        },
+        "tag": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "template": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        }
+      }
+    },
+    "iommi.table.RowGroup": {
+      "bases": [
+        "iommi.fragment.Fragment",
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done",
+        "value"
+      ],
+      "qualname": "iommi.table.RowGroup",
+      "refinables": {
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "children": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "tag": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.table.Table": {
+      "bases": [
+        "iommi.part.Part",
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.table.Table",
+      "refinables": {
+        "action_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.action.Action"
+        },
+        "actions": {
+          "kind": "members",
+          "member_class": "iommi.action.Action",
+          "refinable_type": "RefinableMembers"
+        },
+        "actions_below": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "actions_template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "after": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "assets": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "auto": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.table.TableAutoConfig"
+        },
+        "bulk": {
+          "kind": "class_ref",
+          "refinable_type": "EvaluatedRefinable",
+          "target": "iommi.form.Form"
+        },
+        "bulk_container": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.fragment.Fragment"
+        },
+        "bulk_exclude": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "bulk_filter": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "cell": {
+          "kind": "traditional_class",
+          "refinable_type": "EvaluatedRefinable",
+          "target": "iommi.table.Cell"
+        },
+        "cells_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.table.Cells"
+        },
+        "columns": {
+          "kind": "members",
+          "member_class": "iommi.table.Column",
+          "refinable_type": "RefinableMembers"
+        },
+        "container": {
+          "kind": "class_ref",
+          "refinable_type": "EvaluatedRefinable",
+          "target": "iommi.fragment.Fragment"
+        },
+        "default_sort_order": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "empty_message": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "endpoints": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "form_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.form.Form"
+        },
+        "h_tag": {
+          "kind": "class_ref",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "target": "iommi.fragment.Fragment"
+        },
+        "header": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "invalid_form_message": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "member_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.table.Column"
+        },
+        "model": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "outer": {
+          "kind": "class_ref",
+          "refinable_type": "EvaluatedRefinable",
+          "target": "iommi.fragment.Fragment"
+        },
+        "page_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.page.Page"
+        },
+        "page_size": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "parts": {
+          "kind": "members",
+          "refinable_type": "RefinableMembers"
+        },
+        "query": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "query_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.query.Query"
+        },
+        "query_from_indexes": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "row": {
+          "kind": "class_ref",
+          "refinable_type": "EvaluatedRefinable",
+          "target": "iommi.table.RowConfig"
+        },
+        "row_group_class": {
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.table.RowGroup"
+        },
+        "rows": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "sortable": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "superheader": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "table_tag_wrapper": {
+          "kind": "class_ref",
+          "refinable_type": "EvaluatedRefinable",
+          "target": "iommi.fragment.Fragment"
+        },
+        "tag": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "tbody": {
+          "kind": "class_ref",
+          "refinable_type": "EvaluatedRefinable",
+          "target": "iommi.fragment.Fragment"
+        },
+        "template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "title": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.table.TableAutoConfig": {
+      "bases": [
+        "iommi.from_model.AutoConfig",
+        "iommi.refinable.RefinableObject"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.table.TableAutoConfig",
+      "refinables": {
+        "default_included": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "exclude": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "model": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "rows": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        }
+      }
+    }
+  },
+  "iommi_version": "7.25.1",
+  "schema_version": 2
+}

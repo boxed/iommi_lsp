@@ -147,6 +147,53 @@ def test_installed_apps_with_binop_concat(analyzer, tmp_path: Path) -> None:
     assert "django.contrib.admin" in labels
 
 
+def test_installed_apps_after_module_docstring(analyzer, tmp_path: Path) -> None:
+    """Triple-quoted module docstrings above INSTALLED_APPS must not
+    suppress completion. Django's startproject-generated settings.py
+    opens with one, so this is the common case."""
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        '"""\nDjango settings for blah.\n"""\n\nINSTALLED_APPS = [\n    \'',
+    )
+    labels = set(_labels(analyzer.completions(uri, pos)))
+    assert "django.contrib.admin" in labels
+
+
+def test_installed_apps_nested_workspace_app_with_long_prefix(
+    tmp_path: Path,
+) -> None:
+    """A long realistic INSTALLED_APPS followed by ``'dryft.b`` should
+    surface the nested-package workspace app ``dryft.base``."""
+    (tmp_path / "dryft" / "base").mkdir(parents=True)
+    (tmp_path / "dryft" / "base" / "apps.py").write_text(
+        "from django.apps import AppConfig\n"
+        "class BaseConfig(AppConfig):\n"
+        "    name = 'dryft.base'\n"
+    )
+    a = SettingsAnalyzer(workspace_root=tmp_path)
+    asyncio.run(a.index(tmp_path))
+
+    before = (
+        "INSTALLED_APPS = [\n"
+        "    'servestatic.runserver_nostatic',\n"
+        "    'django_fastdev',\n"
+        "    'django.contrib.auth',\n"
+        "    'django.contrib.contenttypes',\n"
+        "    'django.contrib.sessions',\n"
+        "    'django.contrib.messages',\n"
+        "    'django.contrib.staticfiles',\n"
+        "    'django.contrib.sites',\n"
+        "    'django.contrib.postgres',\n"
+        "    'allauth',\n"
+        "    'iommi',\n"
+        "    'dryft.b"
+    )
+    uri, pos = _write_with_cursor(tmp_path, before)
+    result = a.completions(uri, pos)
+    labels = set(_labels(result))
+    assert "dryft.base" in labels, labels
+
+
 # ---------------------------------------------------------------------------
 # MIDDLEWARE
 # ---------------------------------------------------------------------------

@@ -803,13 +803,10 @@ class _StringCtx:
 
 
 def _string_state_at(source: str, offset: int) -> _StringCtx | None:
-    """Return the open string at *offset*, or None if outside a string.
+    """Return the open single-line string at *offset*, or None.
 
-    Plain-text scan — does not handle triple-quoted strings or f-string
-    expression interpolations precisely. For the iommi auto__include /
-    auto__exclude case the user is mid-typing a short single-line
-    literal, so simple state is enough; anything fancier returns None
-    and we let the normal kwarg-name path try.
+    Skips past closed triple-quoted spans (module docstrings) so they
+    don't poison the state for code below.
     """
     i = 0
     n = min(offset, len(source))
@@ -831,6 +828,19 @@ def _string_state_at(source: str, offset: int) -> _StringCtx | None:
             i += 1
             continue
         if ch in '"\'':
+            if (
+                i + 2 < n
+                and source[i + 1] == ch
+                and source[i + 2] == ch
+            ):
+                closing = source.find(ch * 3, i + 3, n)
+                if closing == -1:
+                    # Triple-quote doesn't close before the cursor — the
+                    # cursor is inside a multi-line string, not eligible
+                    # for single-line completion.
+                    return None
+                i = closing + 3
+                continue
             in_string = ch
             string_start = i
         elif ch == "#":

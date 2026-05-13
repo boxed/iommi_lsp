@@ -678,7 +678,18 @@ def _string_state_at(source: str, offset: int) -> _StringCtx | None:
                 and source[i + 1] == ch
                 and source[i + 2] == ch
             ):
-                return None
+                # Triple-quoted span. Find the matching close and skip
+                # past it — settings.py modules commonly open with a
+                # docstring, and bailing here would suppress completion
+                # for the rest of the file.
+                closing = source.find(ch * 3, i + 3, n)
+                if closing == -1:
+                    # Unterminated triple-quote (or it closes past the
+                    # cursor) — the cursor is inside a multi-line string,
+                    # not a single-line one.
+                    return None
+                i = closing + 3
+                continue
             in_string = ch
             string_start = i
         elif ch == "#":

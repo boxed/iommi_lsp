@@ -110,6 +110,18 @@ class TemplateAnalyzer:
         if "/" not in partial:
             return empty
 
+        # An explicit replacement range is the only way to keep editors
+        # that treat `/` as a word boundary (Helix, Neovim's built-in
+        # client) from replacing only the trailing word — without it,
+        # accepting ``reviews/reviews__tags.html`` on the partial
+        # ``reviews/rev`` produces ``reviews/reviews/reviews__tags.html``.
+        line_start = source.rfind("\n", 0, offset) + 1
+        start_character = _lsp_character_in_line(source, line_start, ctx.start + 1)
+        edit_range = {
+            "start": {"line": line, "character": start_character},
+            "end": {"line": line, "character": character},
+        }
+
         items: list[dict] = []
         for name in self._templates:
             if not name.startswith(partial):
@@ -118,6 +130,7 @@ class TemplateAnalyzer:
                 "label": name,
                 "kind": 17,   # File
                 "insertText": name,
+                "textEdit": {"range": edit_range, "newText": name},
                 "detail": "template",
                 "data": {"source": "iommi_lsp.template-name"},
             })
@@ -208,6 +221,22 @@ def _offset_from_lsp_position(text: str, line: int, character: int) -> int:
         char_units += 2 if ord(ch) > 0xFFFF else 1
         offset += 1
     return offset
+
+
+def _lsp_character_in_line(text: str, line_start: int, target_offset: int) -> int:
+    """Return the UTF-16 character offset of *target_offset* within its line.
+
+    Inverse of :func:`_offset_from_lsp_position` for the character axis
+    when both points are known to be on the same line — used to build
+    LSP ranges from Python ``str`` offsets.
+    """
+    char_units = 0
+    i = line_start
+    while i < target_offset:
+        ch = text[i]
+        char_units += 2 if ord(ch) > 0xFFFF else 1
+        i += 1
+    return char_units
 
 
 class _StringCtx:

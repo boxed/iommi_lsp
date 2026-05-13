@@ -113,6 +113,53 @@ def test_completions_filtered_by_full_prefix(analyzer, tmp_path: Path) -> None:
     assert result.items[0]["insertText"] == "myapp/index.html"
 
 
+def test_completion_textedit_replaces_full_partial(analyzer, tmp_path: Path) -> None:
+    # Without an explicit textEdit range, editors that treat `/` as a
+    # word boundary (Helix, Neovim built-in client) only replace the
+    # trailing word, producing ``myapp/myapp/index.html``. The range
+    # must cover from immediately after the opening quote to the cursor.
+    src = "x = 'myapp/in"
+    uri, pos = _write_with_cursor(tmp_path, src)
+    result = analyzer.completions(uri, pos)
+    item = result.items[0]
+    edit = item["textEdit"]
+    assert edit["newText"] == "myapp/index.html"
+    # Opening quote sits at column len("x = '") - 1; partial starts one
+    # past it. Cursor is at end of src on line 0.
+    quote_col = src.index("'")
+    assert edit["range"] == {
+        "start": {"line": 0, "character": quote_col + 1},
+        "end": {"line": 0, "character": len(src)},
+    }
+
+
+def test_completion_textedit_range_inside_call(analyzer, tmp_path: Path) -> None:
+    src = "render(request, 'myapp/in"
+    uri, pos = _write_with_cursor(tmp_path, src)
+    result = analyzer.completions(uri, pos)
+    edit = result.items[0]["textEdit"]
+    quote_col = src.index("'")
+    assert edit["range"] == {
+        "start": {"line": 0, "character": quote_col + 1},
+        "end": {"line": 0, "character": len(src)},
+    }
+
+
+def test_completion_textedit_range_below_docstring(analyzer, tmp_path: Path) -> None:
+    # Cursor on line 2; range must reference line 2, not the absolute
+    # file offset.
+    pre = '"""Module docstring."""\n\n'
+    line_text = "render(request, 'myapp/in"
+    uri, pos = _write_with_cursor(tmp_path, pre + line_text)
+    result = analyzer.completions(uri, pos)
+    edit = result.items[0]["textEdit"]
+    quote_col = line_text.index("'")
+    assert edit["range"] == {
+        "start": {"line": 2, "character": quote_col + 1},
+        "end": {"line": 2, "character": len(line_text)},
+    }
+
+
 def test_no_match_for_slash_partial_is_non_exclusive(analyzer, tmp_path: Path) -> None:
     # `/`-containing strings aren't always template references (URLs,
     # filesystem paths, regex). When we have nothing to offer, stay out

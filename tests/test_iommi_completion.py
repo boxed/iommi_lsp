@@ -759,6 +759,22 @@ def test_auto_include_string_literal(analyzer_with_django, tmp_path):
     assert result.items[0]["insertText"] == "username"
 
 
+def test_auto_include_string_literal_after_module_docstring(
+    analyzer_with_django, tmp_path,
+):
+    """A module docstring above the cursor must not suppress the
+    string-literal completion path."""
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        '"""Module docstring\nspanning lines.\n"""\n'
+        "from iommi import Table\nfrom myapp.models import User\n"
+        "Table(auto__model=User, auto__include=['us",
+    )
+    result = analyzer_with_django.completions(uri, pos)
+    assert result.exclusive is True
+    assert _labels(result) == ["username"]
+
+
 def test_auto_exclude_string_literal_double_quote(analyzer_with_django, tmp_path):
     uri, pos = _write_with_cursor(
         tmp_path,
