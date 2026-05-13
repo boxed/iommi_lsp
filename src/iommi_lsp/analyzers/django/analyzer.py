@@ -160,10 +160,23 @@ class DjangoAnalyzer:
         receiver = attr_node.value
 
         model = self._resolve_receiver_model(receiver, parsed.tree)
-        if model is None:
-            return False
+        if model is not None and self._attr_is_magic(model, attr_name):
+            return True
 
-        return self._attr_is_magic(model, attr_name)
+        # Narrow fallback for `<field>_id` on FK/OneToOne fields: ty knows
+        # the receiver's type from an annotation (parameter, `self` in a
+        # model method, annotated assignment) but our flow-based resolver
+        # doesn't follow annotations. We restrict this to fk_id to avoid
+        # masking real bugs like `instance.objects`.
+        if (
+            attr_name.endswith("_id")
+            and self.config.is_rule_enabled("fk_id")
+        ):
+            ann_model = self._resolve_via_annotation(receiver, parsed.tree)
+            if ann_model is not None and attr_name in ann_model.fk_id_accessors:
+                return True
+
+        return False
 
     def _parse(self, uri: str, path: Path) -> _ParsedFile | None:
         source = self._source_for(uri, path)
@@ -224,6 +237,96 @@ class DjangoAnalyzer:
                     if inferred is not None:
                         last_match = inferred
         return last_match
+
+    def _resolve_via_annotation(
+        self, receiver: ast.AST, tree: ast.Module
+    ) -> ModelInfo | None:
+        """Resolve a receiver to a model via static type annotations.
+
+        Covers three shapes the flow-based resolver misses:
+
+        * ``self`` inside a method of a Django model class.
+        * A function parameter with a model annotation (``def f(p: Profile)``).
+        * An annotated assignment (``p: Profile = ...``).
+
+        Returns ``None`` if the receiver isn't a bare name or no
+        annotation resolves to a known model.
+        """
+        if not isinstance(receiver, ast.Name):
+            return None
+        var_name = receiver.id
+
+        if var_name == "self":
+            cls = _enclosing_class(tree, receiver)
+            if cls is not None:
+                model = self.django_index.lookup(cls.name)
+                if model is not None:
+                    return model
+
+        scope = _enclosing_function(tree, receiver)
+        if scope is not None and isinstance(
+            scope, (ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            params = (
+                list(scope.args.posonlyargs)
+                + list(scope.args.args)
+                + list(scope.args.kwonlyargs)
+            )
+            if scope.args.vararg is not None:
+                params.append(scope.args.vararg)
+            if scope.args.kwarg is not None:
+                params.append(scope.args.kwarg)
+            for arg in params:
+                if arg.arg == var_name:
+                    model = self._model_from_annotation(arg.annotation)
+                    if model is not None:
+                        return model
+                    break
+
+        search_scope: ast.AST = scope if scope is not None else tree
+        use_pos = (
+            getattr(receiver, "lineno", 0),
+            getattr(receiver, "col_offset", 0),
+        )
+        last_match: ModelInfo | None = None
+        for stmt in ast.walk(search_scope):
+            if not isinstance(stmt, ast.AnnAssign):
+                continue
+            if (stmt.lineno, stmt.col_offset) >= use_pos:
+                continue
+            target = stmt.target
+            if isinstance(target, ast.Name) and target.id == var_name:
+                model = self._model_from_annotation(stmt.annotation)
+                if model is not None:
+                    last_match = model
+        return last_match
+
+    def _model_from_annotation(self, ann: ast.AST | None) -> ModelInfo | None:
+        if ann is None:
+            return None
+        if isinstance(ann, ast.Name):
+            return self.django_index.lookup(ann.id)
+        if isinstance(ann, ast.Attribute):
+            return self.django_index.lookup(ann.attr)
+        if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+            # Quoted/forward-ref: `"Profile"` or `"app.models.Profile"`.
+            simple = ann.value.rsplit(".", 1)[-1]
+            return self.django_index.lookup(simple)
+        if isinstance(ann, ast.Subscript):
+            # Unwrap `Optional[Profile]` / `list[Profile]` / `X | Y` slice.
+            return self._model_from_annotation(ann.slice)
+        if isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr):
+            # `Profile | None` — pick whichever side resolves.
+            return (
+                self._model_from_annotation(ann.left)
+                or self._model_from_annotation(ann.right)
+            )
+        if isinstance(ann, ast.Tuple):
+            for elt in ann.elts:
+                model = self._model_from_annotation(elt)
+                if model is not None:
+                    return model
+        return None
 
     def _infer_call_result_model(self, value: ast.AST) -> ModelInfo | None:
         """Recognise ``Model(...)`` and ``Model.objects.<method>(...)``."""
@@ -1024,6 +1127,26 @@ def _enclosing_function(tree: ast.Module, target: ast.AST) -> ast.AST | None:
     best_span = 10**9
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.lineno is None or node.end_lineno is None:
+            continue
+        if not (node.lineno <= target_line <= node.end_lineno):
+            continue
+        span = node.end_lineno - node.lineno
+        if span < best_span:
+            best = node
+            best_span = span
+    return best
+
+
+def _enclosing_class(tree: ast.Module, target: ast.AST) -> ast.ClassDef | None:
+    target_line = getattr(target, "lineno", None)
+    if target_line is None:
+        return None
+    best: ast.ClassDef | None = None
+    best_span = 10**9
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
             continue
         if node.lineno is None or node.end_lineno is None:
             continue

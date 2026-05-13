@@ -210,6 +210,140 @@ def test_fk_id_accessor_is_dropped(tmp_path: Path):
     assert a.is_false_positive(f.as_uri(), diag) is True
 
 
+def test_fk_id_accessor_on_annotated_param_is_dropped(tmp_path: Path):
+    """`def f(p: Profile): p.user_id` — ty knows p's type from the
+    annotation; the flow-based resolver doesn't, so verify the
+    annotation fallback kicks in for fk_id."""
+    src = (
+        "from myapp.models import Profile\n"
+        "\n"
+        "def f(p: Profile):\n"
+        "    return p.user_id\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    start = src.splitlines()[line].index("user_id")
+    diag = _diag(line, start, start + len("user_id"), "user_id")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_fk_id_accessor_on_self_in_model_method_is_dropped(tmp_path: Path):
+    """`def method(self): self.user_id` inside the model itself."""
+    src = (
+        "from django.db import models\n"
+        "from myapp.models import User\n"
+        "\n"
+        "class Profile(models.Model):\n"
+        "    user = models.ForeignKey(User, on_delete=models.CASCADE)\n"
+        "\n"
+        "    def f(self):\n"
+        "        return self.user_id\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 7
+    start = src.splitlines()[line].index("user_id")
+    diag = _diag(line, start, start + len("user_id"), "user_id")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_fk_id_accessor_on_optional_annotation_is_dropped(tmp_path: Path):
+    """`def f(p: Profile | None): p.user_id` — unwrap the union."""
+    src = (
+        "from myapp.models import Profile\n"
+        "\n"
+        "def f(p: Profile | None):\n"
+        "    return p.user_id\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    start = src.splitlines()[line].index("user_id")
+    diag = _diag(line, start, start + len("user_id"), "user_id")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_fk_id_accessor_on_annotated_assignment_is_dropped(tmp_path: Path):
+    """`p: Profile = get_profile(); p.user_id` — annotated assignment."""
+    src = (
+        "from myapp.models import Profile\n"
+        "\n"
+        "def f():\n"
+        "    p: Profile = get_profile()\n"
+        "    return p.user_id\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 4
+    start = src.splitlines()[line].index("user_id")
+    diag = _diag(line, start, start + len("user_id"), "user_id")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_non_fk_id_attribute_on_annotated_param_is_kept(tmp_path: Path):
+    """The annotation fallback is narrow: it only suppresses fk_id, not
+    e.g. `p.objects` (which would be a real bug on an instance)."""
+    src = (
+        "from myapp.models import Profile\n"
+        "\n"
+        "def f(p: Profile):\n"
+        "    return p.objects\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    start = src.splitlines()[line].index("objects")
+    diag = _diag(line, start, start + len("objects"), "objects")
+
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_unknown_fk_id_on_annotated_param_is_kept(tmp_path: Path):
+    """`p.bogus_id` where `bogus` is not an FK on Profile — real bug."""
+    src = (
+        "from myapp.models import Profile\n"
+        "\n"
+        "def f(p: Profile):\n"
+        "    return p.bogus_id\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    start = src.splitlines()[line].index("bogus_id")
+    diag = _diag(line, start, start + len("bogus_id"), "bogus_id")
+
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
 def test_unrelated_attribute_is_kept(tmp_path: Path):
     """Genuine unresolved attribute on a model must NOT be suppressed."""
     src = (
