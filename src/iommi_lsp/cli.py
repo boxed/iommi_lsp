@@ -151,8 +151,16 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
         # AUTH_USER_MODEL completion draws on workspace models.
         django_index_provider=lambda: django_analyzer.django_index,
     )
+    # Order matters for completion latency: ``_gather`` stops at the first
+    # ``exclusive=True`` analyzer, so put the ones that are cheapest *and*
+    # most likely to claim first.
+    # - settings: ~0.3 ms; bails fast outside a string literal, owns every
+    #   INSTALLED_APPS / MIDDLEWARE / … position.
+    # - templates: ~0.1 ms; bails immediately when the partial has no ``/``.
+    # - iommi / django each cost ~0.7 ms because they parse the whole file
+    #   to decide whether they own the position. They go last.
     analyzers = [
-        django_analyzer, iommi_analyzer, template_analyzer, settings_analyzer,
+        settings_analyzer, template_analyzer, iommi_analyzer, django_analyzer,
     ]
 
     interceptor = DiagnosticInterceptor(analyzers=analyzers)
@@ -182,12 +190,14 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
     if workspace is not None:
         return asyncio.run(_eager_index_then_serve(
             ty_command, analyzers, workspace, editor_to_ty, ty_to_editor, backend_env,
+            on_writer_ready=matchmaker.attach_editor_writer,
         ))
     return asyncio.run(proxy.run(
         ty_command,
         editor_to_ty_hook=editor_to_ty,
         ty_to_editor_hook=ty_to_editor,
         env=backend_env,
+        on_writer_ready=matchmaker.attach_editor_writer,
     ))
 
 
@@ -205,6 +215,7 @@ def _chain_hooks(*hooks):
 
 async def _eager_index_then_serve(
     ty_command, analyzers, workspace, editor_to_ty_hook, ty_to_editor_hook, env,
+    *, on_writer_ready=None,
 ) -> int:
     for a in analyzers:
         await a.index(workspace)
@@ -213,6 +224,7 @@ async def _eager_index_then_serve(
         editor_to_ty_hook=editor_to_ty_hook,
         ty_to_editor_hook=ty_to_editor_hook,
         env=env,
+        on_writer_ready=on_writer_ready,
     )
 
 

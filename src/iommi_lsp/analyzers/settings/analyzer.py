@@ -232,10 +232,11 @@ class SettingsAnalyzer:
         if ctx is None:
             return empty
 
-        partial = source[ctx.start + 1: offset]
         setting = _detect_setting_via_patch(source, ctx.start)
         if setting is None:
             return empty
+
+        partial = source[ctx.start + 1: offset]
 
         candidates = self._candidates_for(setting)
         if not candidates:
@@ -243,6 +244,26 @@ class SettingsAnalyzer:
             # so ty's free-form name completions don't backfill garbage.
             return CompletionResult(items=[], exclusive=True)
 
+        # Server-side filter by the in-string partial. Editor-side
+        # filtering proved unreliable across LSP clients: many treat
+        # ``.`` as a word boundary and only match against the trailing
+        # segment (so ``'dryft.ba`` filters labels against just ``ba``,
+        # which doesn't prefix-match ``django.contrib.admin`` either —
+        # so the user saw the full unfiltered list). Filtering server-
+        # side and shipping ``incomplete=True`` (the default) tells the
+        # editor to re-query each keystroke. The short-circuit in the
+        # matchmaker keeps each re-query at a few ms — no ty round-trip.
+        #
+        # ``textEdit`` is included so that *accepting* a completion
+        # replaces the partial cleanly (the in-string text becomes the
+        # full app name) — that part of the LSP contract is robust
+        # across clients.
+        line_start = source.rfind("\n", 0, offset) + 1
+        start_character = _lsp_character_in_line(source, line_start, ctx.start + 1)
+        edit_range = {
+            "start": {"line": line, "character": start_character},
+            "end": {"line": line, "character": character},
+        }
         items: list[dict] = []
         for value in candidates:
             if partial and not value.startswith(partial):
@@ -251,6 +272,7 @@ class SettingsAnalyzer:
                 "label": value,
                 "kind": 21,   # CompletionItemKind.Constant
                 "insertText": value,
+                "textEdit": {"range": edit_range, "newText": value},
                 "detail": f"{setting}",
                 "data": {"source": "iommi_lsp.settings", "setting": setting},
             })
@@ -625,6 +647,22 @@ def _uri_to_path(uri: str) -> Path | None:
         return None
     parsed = urlparse(uri)
     return Path(unquote(parsed.path))
+
+
+def _lsp_character_in_line(text: str, line_start: int, target_offset: int) -> int:
+    """UTF-16 character offset of *target_offset* within its line.
+
+    Inverse of :func:`_offset_from_lsp_position` for the character axis
+    when both points are on the same line — used to build LSP ranges
+    from Python ``str`` offsets.
+    """
+    char_units = 0
+    i = line_start
+    while i < target_offset:
+        ch = text[i]
+        char_units += 2 if ord(ch) > 0xFFFF else 1
+        i += 1
+    return char_units
 
 
 def _offset_from_lsp_position(text: str, line: int, character: int) -> int:

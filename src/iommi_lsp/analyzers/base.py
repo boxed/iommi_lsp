@@ -33,9 +33,19 @@ class CompletionResult:
     Empty + exclusive is meaningful: "we own this position; show
     nothing" rather than "we have no opinion, fall back to ty". Empty
     + not-exclusive is a no-op.
+
+    *incomplete* — when False, the items returned cover every candidate
+    valid at this cursor position regardless of what partial the user
+    types next. The matchmaker then sets ``isIncomplete: false`` on the
+    LSP response so the editor caches the list and filters locally as
+    the user types, instead of round-tripping a fresh completion request
+    on every keystroke. Defaults to True (the safe choice — items pre-
+    filtered by the current partial or sensitive to chain context like
+    ``__`` boundaries need a re-query to refresh).
     """
     items: list[dict] = field(default_factory=list)
     exclusive: bool = False
+    incomplete: bool = True
 
 
 @runtime_checkable

@@ -46,13 +46,28 @@ def _frame(payload: dict) -> bytes:
 
 
 async def _read_until_id(
-    reader: asyncio.StreamReader, msg_id: int, *, timeout: float = 10.0,
+    reader: asyncio.StreamReader,
+    msg_id: int,
+    *,
+    timeout: float = 10.0,
+    buffered: dict[int, dict] | None = None,
 ) -> dict:
-    """Read frames until we see a response with the given id."""
+    """Read frames until we see a response with the given id.
+
+    Out-of-order responses (the proxy can short-circuit completions
+    while a slower initialize is still being processed by ty) get
+    stashed in *buffered* so a subsequent call can find them without
+    re-reading.
+    """
+    if buffered is not None and msg_id in buffered:
+        return buffered.pop(msg_id)
     while True:
         frame = await asyncio.wait_for(_read_frame(reader), timeout=timeout)
-        if frame.get("id") == msg_id:
+        frame_id = frame.get("id")
+        if frame_id == msg_id:
             return frame
+        if buffered is not None and frame_id is not None:
+            buffered[frame_id] = frame
 
 
 @pytest.mark.asyncio
@@ -94,10 +109,11 @@ async def test_installed_apps_completion_through_proxy():
         }))
         await proc.stdin.drain()
 
-        init = await _read_until_id(proc.stdout, 1)
+        buffered: dict[int, dict] = {}
+        init = await _read_until_id(proc.stdout, 1, buffered=buffered)
         assert init.get("id") == 1
 
-        completion = await _read_until_id(proc.stdout, 2)
+        completion = await _read_until_id(proc.stdout, 2, buffered=buffered)
         result = completion.get("result")
         assert isinstance(result, dict), f"expected dict result, got {result!r}"
         items = result.get("items") or []
@@ -110,6 +126,85 @@ async def test_installed_apps_completion_through_proxy():
         assert "iommi" in labels, labels
         # Workspace discovery via tests/corpus/settings_project/myapp/apps.py.
         assert "myapp" in labels, labels
+
+        proc.stdin.write(_frame({"jsonrpc": "2.0", "method": "exit"}))
+        await proc.stdin.drain()
+        rc = await asyncio.wait_for(proc.wait(), timeout=5.0)
+        assert rc == 0
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_installed_apps_completion_filters_by_prefix_through_proxy():
+    """Regression: an in-string partial like ``my`` must filter completions.
+
+    The bug we're guarding against: at one point we relied on the editor's
+    client-side filter, which doesn't behave consistently across LSP
+    clients (many treat ``.`` as a word boundary and only match the
+    trailing segment — so the user saw the full unfiltered list). The
+    server is now the single source of truth for what gets returned.
+    """
+    # Buffer the editor opens has ``INSTALLED_APPS = ['my`` — cursor at
+    # the end. We expect ``myapp`` (workspace AppConfig) to come back
+    # and the static ``django.contrib.*`` / ``iommi`` candidates to be
+    # filtered out because they don't prefix-match ``my``.
+    text = "INSTALLED_APPS = [\n    'my"
+    cursor_line = 1
+    cursor_char = len("    'my")
+    uri = SETTINGS_PY.as_uri()
+
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "iommi_lsp",
+        "--workspace", str(WORKSPACE),
+        "--ty-command", f"{sys.executable} {FAKE_TY}",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert proc.stdin is not None and proc.stdout is not None
+
+    try:
+        proc.stdin.write(_frame({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"rootUri": WORKSPACE.as_uri(), "capabilities": {}},
+        }))
+        proc.stdin.write(_frame({
+            "jsonrpc": "2.0", "method": "textDocument/didOpen",
+            "params": {"textDocument": {
+                "uri": uri, "languageId": "python",
+                "version": 1, "text": text,
+            }},
+        }))
+        proc.stdin.write(_frame({
+            "jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": cursor_line, "character": cursor_char},
+            },
+        }))
+        await proc.stdin.drain()
+
+        buffered: dict[int, dict] = {}
+        await _read_until_id(proc.stdout, 1, buffered=buffered)
+        completion = await _read_until_id(proc.stdout, 2, buffered=buffered)
+
+        result = completion.get("result")
+        assert isinstance(result, dict), f"expected dict result, got {result!r}"
+        items = result.get("items") or []
+        labels = {it["label"] for it in items}
+
+        # The match: workspace's ``myapp`` (under tests/corpus/settings_project/).
+        assert "myapp" in labels, labels
+        # Every returned label is a real prefix match — no static
+        # ``django.contrib.*`` and no ``iommi`` should slip through.
+        non_matches = [l for l in labels if not l.startswith("my")]
+        assert not non_matches, (
+            f"items must all prefix-match the in-string partial 'my'; "
+            f"got {non_matches!r}"
+        )
 
         proc.stdin.write(_frame({"jsonrpc": "2.0", "method": "exit"}))
         await proc.stdin.drain()

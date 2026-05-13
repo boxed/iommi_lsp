@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from . import log
+from . import jsonrpc, log
 from .analyzers.base import Analyzer, CompletionResult, Diagnostic
 
 
@@ -36,6 +36,7 @@ DID_CHANGE = "textDocument/didChange"
 DID_SAVE = "textDocument/didSave"
 DID_CLOSE = "textDocument/didClose"
 COMPLETION = "textDocument/completion"
+CANCEL_REQUEST = "$/cancelRequest"
 
 
 class DocumentStore:
@@ -287,6 +288,26 @@ class CompletionMatchmaker:
         self._text_provider = text_provider
         self._pending: dict[Any, tuple[str, dict]] = {}
         self._pending_initialize: set[Any] = set()
+        # Ids the editor told us to cancel before ty's response arrived.
+        # We bound the set so a misbehaving client can't grow it unboundedly
+        # (cancel-without-response would leak otherwise).
+        self._cancelled: set[Any] = set()
+        self._cancelled_cap = 1024
+        # When configured, short-circuit known-exclusive completion
+        # positions (settings literals, etc.) by writing the response
+        # directly to the editor instead of round-tripping through ty.
+        # ty's completion latency in large settings.py files dominates
+        # perceived sluggishness — and ty's contribution there is noise
+        # (free-form variable names inside a string literal), so skipping
+        # it is both faster *and* more correct.
+        self._editor_writer: asyncio.StreamWriter | None = None
+
+    def attach_editor_writer(self, writer: asyncio.StreamWriter) -> None:
+        """Wire up the direct-to-editor response path used for short-
+        circuiting exclusive completions. Optional — when not set, the
+        matchmaker behaves exactly like before (round-trip through ty
+        and augment in :meth:`on_response`)."""
+        self._editor_writer = writer
 
     async def on_request(self, body: bytes) -> bytes | None:
         if not body or body[:1] != b"{":
@@ -299,6 +320,17 @@ class CompletionMatchmaker:
             return body
         method = payload.get("method")
         msg_id = payload.get("id")
+        if method == CANCEL_REQUEST:
+            cancel_id = (payload.get("params") or {}).get("id")
+            if cancel_id is not None and cancel_id in self._pending:
+                self._pending.pop(cancel_id, None)
+                if len(self._cancelled) >= self._cancelled_cap:
+                    # Drop the oldest entry — set order is insertion order
+                    # in CPython, so this is the one that's been waiting
+                    # longest without a response from ty.
+                    self._cancelled.discard(next(iter(self._cancelled)))
+                self._cancelled.add(cancel_id)
+            return body
         if method == INITIALIZE and msg_id is not None:
             self._pending_initialize.add(msg_id)
             return body
@@ -312,8 +344,39 @@ class CompletionMatchmaker:
         doc = (params.get("textDocument") or {})
         uri = doc.get("uri")
         position = params.get("position")
-        if isinstance(uri, str) and isinstance(position, dict):
-            self._pending[msg_id] = (uri, position)
+        if not (isinstance(uri, str) and isinstance(position, dict)):
+            return body
+
+        # Short-circuit known-exclusive positions: when an analyzer
+        # claims a position outright (Django ORM kwarg, INSTALLED_APPS,
+        # iommi auto field name…), ty's response is going to be
+        # discarded anyway — so don't wait for it. Build the response
+        # here and write it directly to the editor.
+        if self._editor_writer is not None:
+            try:
+                extras, exclusive, incomplete = self._gather(uri, position)
+            except Exception:
+                _log.exception("short-circuit gather crashed; falling back to ty")
+                extras, exclusive, incomplete = [], False, True
+            if exclusive:
+                partial = self._partial_at(uri, position)
+                items = list(extras)
+                _annotate_sort_text(items, partial)
+                result = {
+                    "isIncomplete": not (exclusive and not incomplete),
+                    "items": items,
+                }
+                synth = json.dumps(
+                    {"jsonrpc": "2.0", "id": msg_id, "result": result},
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                try:
+                    await jsonrpc.write_message(self._editor_writer, synth)
+                except Exception:
+                    _log.exception("synthetic completion write failed; falling back")
+                else:
+                    return None   # don't forward to ty; we've already responded
+        self._pending[msg_id] = (uri, position)
         return body
 
     async def on_response(self, body: bytes) -> bytes | None:
@@ -328,6 +391,14 @@ class CompletionMatchmaker:
         msg_id = payload.get("id")
         if msg_id is None:
             return body
+        if msg_id in self._cancelled:
+            # Editor already cancelled this; forward ty's reply (likely a
+            # RequestCancelled error) untouched and skip analyzers. Never
+            # rewrite an error into a synthetic success — the editor has
+            # moved on.
+            self._cancelled.discard(msg_id)
+            self._pending.pop(msg_id, None)
+            return body
         if msg_id in self._pending_initialize:
             self._pending_initialize.discard(msg_id)
             return _ensure_completion_capability(payload, body)
@@ -335,16 +406,20 @@ class CompletionMatchmaker:
         if context is None:
             return body
         uri, position = context
-        extras, exclusive = self._gather(uri, position)
+        extras, exclusive, incomplete = self._gather(uri, position)
         partial = self._partial_at(uri, position)
 
         # Decide what kind of mutation (if any) we need to make.
         merged = bool(extras) or exclusive
         # When we know the buffer text, we always want to repack so we can
-        # force ``isIncomplete: true`` — that prevents the editor from
-        # serving a stale cached completion list with its own scoring
-        # while the user keeps typing (which is what keeps ``afirst`` at
-        # the top once you've reached ``User.objects.fi``).
+        # set ``isIncomplete`` deliberately — that prevents the editor
+        # from serving a stale cached completion list with its own
+        # scoring while the user keeps typing (which is what keeps
+        # ``afirst`` at the top once you've reached ``User.objects.fi``).
+        # The exception is when every analyzer that contributed says its
+        # items are complete (e.g. INSTALLED_APPS) — there we want
+        # ``isIncomplete: false`` so the editor caches and filters
+        # locally instead of round-tripping every keystroke.
         will_repack = self._text_provider is not None
         if not merged and not will_repack:
             return body   # zero-copy: nothing for us to do here
@@ -384,9 +459,13 @@ class CompletionMatchmaker:
                 _annotate_sort_text(items, partial)
             result = payload.get("result")
             if isinstance(result, dict):
-                # Force re-request on each keystroke so our prefix
-                # priority gets recomputed against the latest partial.
-                result["isIncomplete"] = True
+                # Only force re-request when re-querying is actually
+                # required — either because we're augmenting ty's items
+                # (so our prefix-priority sort needs the latest partial)
+                # or because at least one contributing analyzer says its
+                # items depend on context that the editor's local filter
+                # can't reproduce (e.g. iommi ``__`` chain crossings).
+                result["isIncomplete"] = not (exclusive and not incomplete)
 
         return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
@@ -403,15 +482,32 @@ class CompletionMatchmaker:
             start -= 1
         return text[start:end]
 
-    def _gather(self, uri: str, position: dict) -> tuple[list[dict], bool]:
-        """Collect items + exclusivity across analyzers.
+    def _gather(self, uri: str, position: dict) -> tuple[list[dict], bool, bool]:
+        """Collect items + exclusivity + incompleteness across analyzers.
 
         Accepts both the structured ``CompletionResult`` return and the
         legacy bare ``list[dict]`` — the latter is treated as
         non-exclusive so older analyzer code keeps working.
+
+        Stops the moment an analyzer returns ``exclusive=True``: by
+        contract that analyzer owns the position and no other analyzer
+        is going to contribute anything but empty/non-exclusive (each
+        recognises a different context — INSTALLED_APPS string vs. ORM
+        kwarg vs. iommi auto field). Running the rest just to confirm
+        they have nothing to say costs an AST parse each. For a
+        16 KB ``settings.py`` that's ~1.5 ms of pure waste per keystroke
+        — enough to be felt on burst typing.
+
+        The returned ``incomplete`` flag is the OR across analyzers that
+        actually contributed (items or an exclusive empty). An analyzer
+        that didn't speak up doesn't sway the decision either way; if
+        nobody spoke up, ``incomplete`` defaults to True so we keep the
+        re-query-on-every-keystroke behaviour for ty-only responses.
         """
         all_items: list[dict] = []
         exclusive = False
+        incomplete = False
+        spoke = False
         for a in self.analyzers:
             fn = getattr(a, "completions", None)
             if fn is None:
@@ -426,10 +522,20 @@ class CompletionMatchmaker:
                 continue
             if isinstance(result, CompletionResult):
                 all_items.extend(result.items)
-                exclusive = exclusive or result.exclusive
+                if result.items or result.exclusive:
+                    spoke = True
+                    incomplete = incomplete or result.incomplete
+                if result.exclusive:
+                    exclusive = True
+                    break   # this analyzer claims the position; skip the rest
             elif isinstance(result, list):
                 all_items.extend(result)
-        return all_items, exclusive
+                if result:
+                    spoke = True
+                    incomplete = True
+        if not spoke:
+            incomplete = True
+        return all_items, exclusive, incomplete
 
 
 # ---------------------------------------------------------------------------
@@ -538,8 +644,14 @@ class EditorRequestSniffer:
         if self._document_store is not None:
             changes = params.get("contentChanges") or []
             self._document_store.did_change(uri, list(changes))
-        if self._on_file_changed is not None:
-            self._spawn(self._on_file_changed(uri))
+        # Deliberately *don't* fire on_file_changed here. didChange fires
+        # per keystroke and the disk file hasn't moved — the Django
+        # analyzer's reindex (the expensive bit, ~120 ms on a workspace
+        # with hundreds of models) would re-scrape the same on-disk
+        # content every keystroke and rebuild the whole index for
+        # nothing. The DocumentStore is enough to keep completion fresh;
+        # disk-state reindexing only needs to happen on didSave (which
+        # the main dispatcher above handles).
 
     def _handle_did_close(self, payload: dict) -> None:
         params = payload.get("params") or {}

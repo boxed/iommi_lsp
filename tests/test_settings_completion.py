@@ -101,10 +101,47 @@ def test_installed_apps_offers_django_contrib(analyzer, tmp_path: Path) -> None:
 
 
 def test_installed_apps_filters_by_prefix(analyzer, tmp_path: Path) -> None:
+    # Editor-side filtering proved unreliable (many LSP clients treat
+    # ``.`` as a word boundary), so we filter server-side: completion
+    # items must all be prefixed by the user's in-string text.
     uri, pos = _write_with_cursor(tmp_path, "INSTALLED_APPS = ['django.contrib.au")
     labels = _labels(analyzer.completions(uri, pos))
     assert "django.contrib.auth" in labels
+    assert "django.contrib.admin" not in labels   # ``ad`` ≠ prefix of ``au``
+
+
+def test_installed_apps_filters_by_prefix_workspace_app(tmp_path: Path) -> None:
+    # Regression: typing ``'dryft.ba`` inside INSTALLED_APPS must NOT
+    # return every candidate — only items whose value prefix-matches
+    # ``dryft.ba`` (i.e. ``dryft.base`` and any nested ``dryft.ba*``).
+    # We've broken this twice now by trusting the editor to filter
+    # client-side; this test pins the contract at the analyzer boundary.
+    (tmp_path / "dryft" / "base").mkdir(parents=True)
+    (tmp_path / "dryft" / "base" / "apps.py").write_text(
+        "from django.apps import AppConfig\n"
+        "class BaseConfig(AppConfig):\n"
+        "    name = 'dryft.base'\n"
+    )
+    (tmp_path / "dryft" / "core").mkdir(parents=True)
+    (tmp_path / "dryft" / "core" / "apps.py").write_text("")
+    a = SettingsAnalyzer(workspace_root=tmp_path)
+    asyncio.run(a.index(tmp_path))
+
+    uri, pos = _write_with_cursor(tmp_path, "INSTALLED_APPS = ['dryft.ba")
+    labels = _labels(a.completions(uri, pos))
+    # The match — workspace AppConfig declares this name.
+    assert "dryft.base" in labels
+    # Built-in django.contrib.* candidates must NOT slip through.
     assert "django.contrib.admin" not in labels
+    assert "django.contrib.auth" not in labels
+    # Sibling workspace app that doesn't share the prefix must NOT
+    # appear either.
+    assert "dryft.core" not in labels
+    # And the iommi extra app — also no.
+    assert "iommi" not in labels
+    # Every returned label is a real prefix match.
+    for label in labels:
+        assert label.startswith("dryft.ba"), label
 
 
 def test_installed_apps_offers_workspace_app(tmp_path: Path) -> None:
@@ -211,6 +248,7 @@ def test_middleware_filters_by_prefix(analyzer, tmp_path: Path) -> None:
         tmp_path, "MIDDLEWARE = ['django.middleware.csrf"
     )
     labels = _labels(analyzer.completions(uri, pos))
+    # The only middleware whose dotted name prefixes ``django.middleware.csrf``.
     assert labels == ["django.middleware.csrf.CsrfViewMiddleware"]
 
 

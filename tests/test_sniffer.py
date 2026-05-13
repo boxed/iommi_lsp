@@ -88,7 +88,13 @@ async def test_initialize_only_triggers_once():
 
 
 @pytest.mark.asyncio
-async def test_did_change_triggers_file_callback():
+async def test_did_change_does_not_trigger_file_callback():
+    # didChange happens per keystroke and the disk file hasn't moved —
+    # the analyzers' reindex (Django re-scrapes + rebuilds the whole
+    # workspace index, ~120 ms on a project with hundreds of models)
+    # would burn that cost every keystroke for no gain. The
+    # DocumentStore is enough to keep completion fresh; on_file_changed
+    # is reserved for didSave (disk state actually changed).
     seen: list[str] = []
 
     async def cb(uri: str) -> None:
@@ -101,6 +107,23 @@ async def test_did_change_triggers_file_callback():
             "textDocument": {"uri": "file:///tmp/p/foo.py", "version": 2},
             "contentChanges": [],
         },
+    })
+    await sniffer(body)
+    await asyncio.sleep(0)
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_did_save_triggers_file_callback():
+    seen: list[str] = []
+
+    async def cb(uri: str) -> None:
+        seen.append(uri)
+
+    sniffer = EditorRequestSniffer(on_file_changed=cb)
+    body = _frame_body({
+        "jsonrpc": "2.0", "method": "textDocument/didSave",
+        "params": {"textDocument": {"uri": "file:///tmp/p/foo.py"}},
     })
     await sniffer(body)
     await asyncio.sleep(0)

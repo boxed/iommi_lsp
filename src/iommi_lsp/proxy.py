@@ -83,11 +83,18 @@ async def run_with_streams(
     editor_to_ty_hook: Hook = _passthrough,
     ty_to_editor_hook: Hook = _passthrough,
     env: Mapping[str, str] | None = None,
+    on_writer_ready: Callable[[asyncio.StreamWriter], None] | None = None,
 ) -> int:
     """Run the proxy against pre-built editor streams. Returns ty's exit code.
 
     Split from :func:`run` so tests can inject in-memory streams instead
     of going through stdio.
+
+    *on_writer_ready* — optional hook called with the live editor writer
+    once it's set up but before the message pumps start. Used by the
+    matchmaker to inject synthetic responses for known-exclusive
+    completion positions without round-tripping through ty (the dominant
+    cost on first-popup latency in large settings.py files).
     """
     _log.info("spawning backend: %s", " ".join(shlex.quote(p) for p in ty_command))
     proc = await asyncio.create_subprocess_exec(
@@ -98,6 +105,9 @@ async def run_with_streams(
         env=env,
     )
     assert proc.stdin is not None and proc.stdout is not None
+
+    if on_writer_ready is not None:
+        on_writer_ready(editor_writer)
 
     pump_in = asyncio.create_task(
         _pump("editor→ty", editor_reader, proc.stdin, editor_to_ty_hook),
@@ -139,6 +149,7 @@ async def run(
     editor_to_ty_hook: Hook = _passthrough,
     ty_to_editor_hook: Hook = _passthrough,
     env: Mapping[str, str] | None = None,
+    on_writer_ready: Callable[[asyncio.StreamWriter], None] | None = None,
 ) -> int:
     """Run the proxy on the process's stdio."""
     editor_reader, editor_writer = await _stdio_streams()
@@ -149,4 +160,5 @@ async def run(
         editor_to_ty_hook=editor_to_ty_hook,
         ty_to_editor_hook=ty_to_editor_hook,
         env=env,
+        on_writer_ready=on_writer_ready,
     )
