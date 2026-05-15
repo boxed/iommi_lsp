@@ -833,3 +833,133 @@ def test_string_in_unrelated_kwarg_is_silent(analyzer_with_django, tmp_path):
     result = analyzer_with_django.completions(uri, pos)
     assert result.exclusive is False
     assert result.items == []
+
+
+# ---------------------------------------------------------------------------
+# class Meta: body completions — iommi treats assignments inside ``Meta``
+# as kwargs to the enclosing class's constructor, so completions must work
+# at that position too.
+# ---------------------------------------------------------------------------
+
+
+def test_meta_body_attrs_offers_class_and_style(analyzer, tmp_path):
+    # The reported bug: `class Meta: attrs__|` was emitting garbage from
+    # other LSPs. We own this slot now and only offer the two valid
+    # html_attrs sub-keys.
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from iommi import Table\n"
+        "class MyTable(Table):\n"
+        "    class Meta:\n"
+        "        attrs__",
+    )
+    result = analyzer.completions(uri, pos)
+    assert result.exclusive is True
+    labels = set(_labels(result))
+    assert "attrs__class__" in labels
+    assert "attrs__style__" in labels
+    assert labels == {"attrs__class__", "attrs__style__"}
+
+
+def test_meta_body_top_level_refinables(analyzer, tmp_path):
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from iommi import Table\n"
+        "class MyTable(Table):\n"
+        "    class Meta:\n"
+        "        ",
+    )
+    result = analyzer.completions(uri, pos)
+    assert result.exclusive is True
+    labels = set(_labels(result))
+    # Should contain Table's refinables (plus inherited Part.attrs).
+    assert "columns__" in labels
+    assert "attrs__" in labels
+    assert "page_size" in labels   # scalar — labels carry no `=` suffix
+
+
+def test_meta_body_chain_drills_into_members(analyzer, tmp_path):
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from iommi import Table\n"
+        "class MyTable(Table):\n"
+        "    class Meta:\n"
+        "        columns__name__cell__",
+    )
+    result = analyzer.completions(uri, pos)
+    assert result.exclusive is True
+    labels = set(_labels(result))
+    assert "columns__name__cell__attrs__" in labels
+
+
+def test_meta_body_non_iommi_class_silent(analyzer, tmp_path):
+    # Outer class isn't iommi-derived. Stay non-exclusive so ty's
+    # normal completions show through.
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "class Plain:\n"
+        "    class Meta:\n"
+        "        attrs__",
+    )
+    result = analyzer.completions(uri, pos)
+    assert result.exclusive is False
+    assert result.items == []
+
+
+def test_meta_body_user_subclass_chain(analyzer, tmp_path):
+    # User class extending Table indirectly: Meta of MyChild should still
+    # resolve to Table's refinable surface.
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from iommi import Table\n"
+        "class MyBase(Table):\n"
+        "    pass\n"
+        "class MyChild(MyBase):\n"
+        "    class Meta:\n"
+        "        attrs__",
+    )
+    result = analyzer.completions(uri, pos)
+    assert result.exclusive is True
+    labels = set(_labels(result))
+    assert "attrs__class__" in labels
+    assert "attrs__style__" in labels
+
+
+def test_meta_body_auto_model_resolves_field_names(
+    analyzer_with_django, tmp_path,
+):
+    # `class Meta: auto__model = User; columns__|` should suggest model
+    # field names — same as `Table(auto__model=User, columns__|)`.
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from iommi import Table\n"
+        "from myapp.models import User\n"
+        "class UserTable(Table):\n"
+        "    class Meta:\n"
+        "        auto__model = User\n"
+        "        columns__",
+    )
+    result = analyzer_with_django.completions(uri, pos)
+    assert result.exclusive is True
+    labels = set(_labels(result))
+    assert "columns__username__" in labels
+    assert "columns__email__" in labels
+
+
+def test_meta_body_no_graph_falls_back_to_synth(tmp_path):
+    # The call path synthesises a stub for Table/Form/Page/Query when the
+    # graph isn't built; the Meta-body path must do the same. Otherwise
+    # `class MyPage(Page): class Meta: par` is silent while
+    # `Page(par` returns ``parts__`` exclusively.
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from iommi import Page\n"
+        "class MyPage(Page):\n"
+        "    class Meta:\n"
+        "        par",
+    )
+    result = a.completions(uri, pos)
+    assert result.exclusive is True
+    assert _labels(result) == ["parts__"]

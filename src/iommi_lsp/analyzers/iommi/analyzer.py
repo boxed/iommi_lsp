@@ -229,9 +229,15 @@ class IommiAnalyzer:
         partial = source[partial_start:offset]
 
         # Cheap precondition — iommi kwarg names can only follow ``(``
-        # or ``,``. Skips ~13 ms of buffer parse for top-level
-        # identifiers in big files.
-        if not _is_call_arg_position(source, partial_start):
+        # or ``,``, OR sit at the start of a statement inside a
+        # ``class Meta:`` body (iommi treats Meta assignments as kwargs
+        # to the enclosing class's constructor). Skips ~13 ms of buffer
+        # parse for top-level identifiers in big files.
+        in_call = _is_call_arg_position(source, partial_start)
+        in_meta = (not in_call) and _is_meta_assignment_position(
+            source, partial_start,
+        )
+        if not (in_call or in_meta):
             return empty
 
         marker = "__iommi_lsp_completion_marker__"
@@ -245,12 +251,42 @@ class IommiAnalyzer:
         except SyntaxError:
             return empty
 
-        marker_call = _find_marker_call(tree, marker)
-        if marker_call is None:
-            return empty
-
         imports = _collect_imports(tree)
-        cls_qualname = _resolve_callee(marker_call.func, imports)
+
+        if in_call:
+            marker_call = _find_marker_call(tree, marker)
+            if marker_call is None:
+                return empty
+            cls_qualname = _resolve_callee(marker_call.func, imports)
+            auto_model = self._resolve_auto_model(marker_call)
+        else:
+            meta_owner = _find_marker_meta_owner(tree, marker)
+            if meta_owner is None:
+                return empty
+            user_iommi_subclasses = _collect_user_iommi_subclasses(
+                tree, imports, self.graph,
+            )
+            cls_qualname = _resolve_iommi_base(
+                meta_owner, imports, self.graph, user_iommi_subclasses,
+            )
+            if cls_qualname is None:
+                # No iommi-known base, but a well-known iommi class
+                # (Table/Form/Page/Query) is synthesisable downstream.
+                # Mirror the call path, which hands ``_resolve_callee``'s
+                # bare qualname to ``_synthesize_iommi_class`` so users
+                # get exclusive completions before they've run
+                # ``iommi_lsp graph build``.
+                for base in meta_owner.bases:
+                    qn = _resolve_callee(base, imports)
+                    if qn is not None:
+                        cls_qualname = qn
+                        break
+            meta_def = _find_meta_class(meta_owner)
+            auto_model = (
+                self._resolve_auto_model_from_meta(meta_def)
+                if meta_def is not None else None
+            )
+
         if cls_qualname is None:
             return empty
         cls = self.graph.get(cls_qualname)
@@ -265,8 +301,6 @@ class IommiAnalyzer:
             cls = _synthesize_iommi_class(cls_qualname)
         if cls is None:
             return empty
-
-        auto_model = self._resolve_auto_model(marker_call)
 
         if "__" in partial:
             head_chain, _, suffix = partial.rpartition("__")
@@ -397,6 +431,40 @@ class IommiAnalyzer:
                 model = _resolve_model_from_manager_chain(kw.value, index)
                 if model is not None:
                     return model
+        return None
+
+    def _resolve_auto_model_from_meta(
+        self, meta: ast.ClassDef,
+    ) -> "ModelInfo | None":
+        """Meta-body twin of ``_resolve_auto_model``. iommi treats
+        ``class Meta: auto__model = User`` as the kwarg form ``auto__model=
+        User`` on the enclosing class's constructor."""
+        if self._django_index_provider is None:
+            return None
+        index = self._django_index_provider()
+        if index is None or not getattr(index, "models", None):
+            return None
+        for stmt in meta.body:
+            if isinstance(stmt, ast.AnnAssign):
+                if not isinstance(stmt.target, ast.Name) or stmt.value is None:
+                    continue
+                pairs = [(stmt.target.id, stmt.value)]
+            elif isinstance(stmt, ast.Assign):
+                pairs = [
+                    (t.id, stmt.value)
+                    for t in stmt.targets if isinstance(t, ast.Name)
+                ]
+            else:
+                continue
+            for name, value in pairs:
+                if name in ("auto__model", "model"):
+                    model = _resolve_model_from_name(value, index)
+                    if model is not None:
+                        return model
+                elif name in ("auto__rows", "auto__instance", "rows", "instance"):
+                    model = _resolve_model_from_manager_chain(value, index)
+                    if model is not None:
+                        return model
         return None
 
     # -- internals ------------------------------------------------------------
@@ -962,6 +1030,23 @@ def _is_call_arg_position(source: str, partial_start: int) -> bool:
     return source[i] in "(,"
 
 
+def _is_meta_assignment_position(source: str, partial_start: int) -> bool:
+    """True if *partial_start* sits at the start of a statement line
+    (only whitespace separates it from the preceding newline) and the
+    file contains a ``class Meta:`` declaration above the cursor.
+
+    Cheap heuristic — the AST pass downstream confirms we're actually
+    inside a Meta body. Without the substring guard we'd pay the parse
+    cost for every top-level identifier in non-iommi files.
+    """
+    i = partial_start - 1
+    while i >= 0 and source[i] in " \t":
+        i -= 1
+    if i >= 0 and source[i] != "\n":
+        return False
+    return "class Meta:" in source[:partial_start]
+
+
 def _close_brackets(src: str) -> str:
     """Return the closing tokens needed to balance *src*. String-aware."""
     stack: list[str] = []
@@ -1143,6 +1228,25 @@ def _find_marker_call(tree: ast.AST, marker: str) -> ast.Call | None:
         for kw in node.keywords:
             if kw.arg == marker:
                 return node
+    return None
+
+
+def _find_marker_meta_owner(tree: ast.AST, marker: str) -> ast.ClassDef | None:
+    """Outer class whose ``Meta`` body assigns to *marker*. Returns the
+    outer class (not the ``Meta`` itself) so the caller can resolve its
+    iommi base. ``None`` if the marker landed outside any Meta body
+    (e.g. at module scope, inside a function, or in a class without a
+    ``Meta:`` nested class)."""
+    for outer in ast.walk(tree):
+        if not isinstance(outer, ast.ClassDef):
+            continue
+        meta = _find_meta_class(outer)
+        if meta is None:
+            continue
+        for stmt in meta.body:
+            for target in _meta_assignment_targets(stmt):
+                if target.id == marker:
+                    return outer
     return None
 
 
