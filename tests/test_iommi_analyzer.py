@@ -821,3 +821,114 @@ def test_attr_path_diagnostic_pins_bad_segment(attr_workspace: Path):
     col_start = d["range"]["start"]["character"]
     col_end = d["range"]["end"]["character"]
     assert line[col_start:col_end] == "emailx"
+
+
+# ---------------------------------------------------------------------------
+# Background graph refresh on startup
+# ---------------------------------------------------------------------------
+
+
+def test_stale_graph_is_refreshed_in_background(tmp_path: Path):
+    """A graph file written by an older iommi_lsp can be missing
+    refinables the current reflector knows about (real-world case:
+    pre-fix graphs lacked ``@refinable``-decorated methods like
+    ``Table.preprocess_row``). ``index()`` should load the stale graph
+    for immediate use, then atomically swap in a freshly reflected one.
+    """
+    pytest.importorskip("iommi")   # in-process rebuild needs iommi here.
+
+    # Stale graph: looks like iommi.table.Table but with an empty set of
+    # refinables (so anything will be flagged as unknown until the
+    # background rebuild swaps it out).
+    stale_table = IommiClass(
+        qualname="iommi.table.Table",
+        bases=[],
+        refinables={},
+    )
+    save_graph(
+        IommiGraph(
+            iommi_version="0.0-stale",
+            classes={stale_table.qualname: stale_table},
+        ),
+        tmp_path / GRAPH_FILENAME,
+    )
+
+    async def run():
+        a = IommiAnalyzer(workspace_root=tmp_path)
+        await a.index(tmp_path)
+        # Immediately after index(): the loaded (stale) graph is live.
+        loaded_table = a.graph.get("iommi.table.Table")
+        assert loaded_table is not None
+        assert "preprocess_row" not in loaded_table.refinables
+        # Wait for the background rebuild to finish.
+        assert a._rebuild_task is not None
+        await a._rebuild_task
+        return a
+
+    a = asyncio.run(run())
+
+    # After the swap the fresh graph is live — preprocess_row, a
+    # ``@refinable``-decorated method on Table, is now known.
+    table = a.graph.get("iommi.table.Table")
+    assert table is not None
+    assert "preprocess_row" in table.refinables, (
+        "background rebuild did not swap in the fresh reflector graph"
+    )
+
+
+def test_background_refresh_failure_keeps_loaded_graph(
+    tmp_path: Path, monkeypatch
+):
+    """If the background rebuild fails (e.g. iommi can't be imported in
+    any candidate venv), we must not clobber the loaded graph."""
+    stale_table = IommiClass(
+        qualname="iommi.table.Table",
+        bases=[],
+        refinables={},
+    )
+    save_graph(
+        IommiGraph(
+            iommi_version="0.0-stale",
+            classes={stale_table.qualname: stale_table},
+        ),
+        tmp_path / GRAPH_FILENAME,
+    )
+
+    from iommi_lsp.analyzers.iommi import analyzer as analyzer_mod
+    monkeypatch.setattr(analyzer_mod, "_try_build_graph", lambda _p: None)
+
+    async def run():
+        a = IommiAnalyzer(workspace_root=tmp_path)
+        await a.index(tmp_path)
+        assert a._rebuild_task is not None
+        await a._rebuild_task
+        return a
+
+    a = asyncio.run(run())
+
+    # Loaded graph unchanged — single class, no preprocess_row.
+    assert set(a.graph.classes) == {"iommi.table.Table"}
+    assert a.graph.iommi_version == "0.0-stale"
+
+
+def test_no_background_rebuild_when_auto_build_disabled(tmp_path: Path):
+    """``auto_build=False`` opts out of all build paths, including the
+    new background refresh. Tests that assert "no graph" or "exactly
+    this loaded graph" behaviour rely on this."""
+    stale_table = IommiClass(
+        qualname="iommi.table.Table",
+        bases=[],
+        refinables={},
+    )
+    save_graph(
+        IommiGraph(
+            iommi_version="0.0-stale",
+            classes={stale_table.qualname: stale_table},
+        ),
+        tmp_path / GRAPH_FILENAME,
+    )
+
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+    assert a._rebuild_task is None
+    assert a.graph.iommi_version == "0.0-stale"

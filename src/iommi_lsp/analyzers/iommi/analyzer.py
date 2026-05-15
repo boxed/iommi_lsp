@@ -13,6 +13,7 @@ cleanly with the Django filter on the same proxy.
 from __future__ import annotations
 
 import ast
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -123,12 +124,16 @@ class IommiAnalyzer:
         # build attempts.
         self._auto_build = auto_build
         self._cache: dict[str, _ParsedFile] = {}
+        # Background rebuild handle. ``index()`` spawns this whenever a
+        # graph was loaded from disk so the user benefits from the
+        # latest reflector logic (and any iommi upgrade since the graph
+        # was last written) without having to rebuild manually. Stored
+        # on ``self`` so tests can await it.
+        self._rebuild_task: asyncio.Task | None = None
 
     # -- Analyzer protocol ----------------------------------------------------
 
     async def index(self, workspace_root: Path) -> None:
-        import asyncio
-
         self.workspace_root = workspace_root
         graph_path = workspace_root / GRAPH_FILENAME
         loaded = load_graph(graph_path)
@@ -139,6 +144,18 @@ class IommiAnalyzer:
                 len(self.graph.classes), self.graph.iommi_version,
             )
             self._cache.clear()
+            # Schedule a background rebuild. The on-disk graph can be
+            # stale in two ways the schema_version bump doesn't catch:
+            # the user upgraded iommi without rebuilding, or the
+            # reflector itself learned new tricks (e.g. picking up
+            # ``@refinable``-decorated methods) in a newer iommi_lsp.
+            # Rebuilding in the background means we use the loaded
+            # graph immediately and swap in the fresh one atomically
+            # when it's ready.
+            if self._auto_build:
+                self._rebuild_task = asyncio.create_task(
+                    self._background_rebuild(graph_path)
+                )
             return
 
         # No graph on disk. Try to build one — first in-process (free
@@ -161,6 +178,36 @@ class IommiAnalyzer:
                 "is built."
             )
         self._cache.clear()
+
+    async def _background_rebuild(self, graph_path: Path) -> None:
+        """Rebuild the graph and atomically swap it in if successful.
+
+        Runs the reflector in a thread so a slow subprocess build
+        doesn't block the event loop. On failure (iommi not importable
+        from any candidate interpreter, broken reflector, etc.) we keep
+        the previously loaded graph — never worse than where we
+        started. Single-attribute store to ``self.graph`` is atomic in
+        CPython, so synchronous readers (``additional_diagnostics`` /
+        ``completions``) see either the old or the new graph but never
+        a torn one.
+        """
+        _log.info("scheduling background iommi graph refresh for %s", graph_path)
+        try:
+            built = await asyncio.to_thread(_try_build_graph, graph_path)
+        except Exception:
+            _log.exception("background iommi graph refresh crashed")
+            return
+        if built is None:
+            return
+        old = self.graph
+        self.graph = built
+        self._cache.clear()
+        _log.info(
+            "swapped in refreshed iommi graph: %d → %d classes "
+            "(iommi %s → %s)",
+            len(old.classes), len(built.classes),
+            old.iommi_version, built.iommi_version,
+        )
 
     async def on_file_changed(self, uri: str) -> None:
         self._cache.pop(uri, None)
@@ -665,7 +712,10 @@ def _try_build_graph(graph_path: Path) -> IommiGraph | None:
     *graph_path*); returns ``None`` if every strategy failed. The
     caller falls back to synthesised stubs.
     """
-    _log.info("no iommi graph at %s — attempting to build", graph_path)
+    if graph_path.exists():
+        _log.info("rebuilding iommi graph at %s", graph_path)
+    else:
+        _log.info("no iommi graph at %s — attempting to build", graph_path)
 
     # Strategy 1: in-process.
     inline = _try_inline_build(graph_path)
