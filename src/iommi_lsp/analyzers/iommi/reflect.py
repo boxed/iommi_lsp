@@ -140,6 +140,8 @@ def _classify(name: str, refinable_obj: Any, default_value: Any, annotation: Any
         EvaluatedRefinable,
         RefinableMembers,
         SpecialEvaluatedRefinable,
+        is_evaluated_refinable,
+        is_special_evaluated_refinable,
     )
 
     rtype = type(refinable_obj).__name__
@@ -152,7 +154,10 @@ def _classify(name: str, refinable_obj: Any, default_value: Any, annotation: Any
             member_class=_annotation_member_class(annotation),
         )
 
-    if name == "attrs" and isinstance(refinable_obj, SpecialEvaluatedRefinable):
+    if name == "attrs" and (
+        isinstance(refinable_obj, SpecialEvaluatedRefinable)
+        or is_special_evaluated_refinable(refinable_obj)
+    ):
         return Refinable(
             name=name,
             kind="html_attrs",
@@ -180,7 +185,7 @@ def _classify(name: str, refinable_obj: Any, default_value: Any, annotation: Any
             )
         return Refinable(name=name, kind="open_namespace", refinable_type=rtype)
 
-    if isinstance(refinable_obj, EvaluatedRefinable):
+    if isinstance(refinable_obj, EvaluatedRefinable) or is_evaluated_refinable(refinable_obj):
         return Refinable(name=name, kind="evaluated_scalar", refinable_type=rtype)
 
     return Refinable(name=name, kind="scalar", refinable_type=rtype)
@@ -258,6 +263,7 @@ def _apply_traditional_overrides(
 
 def _reflect_class(cls: type) -> IommiClass:
     from iommi.refinable import Refinable as IommiRefinable
+    from iommi.refinable import is_refinable_function
 
     meta = dict(cls.get_meta()) if hasattr(cls, "get_meta") else {}
 
@@ -266,9 +272,20 @@ def _reflect_class(cls: type) -> IommiClass:
         annotations.update(getattr(base, "__annotations__", {}))
 
     refinables: dict[str, Refinable] = {}
+
+    # Prefer iommi's own collected refinable surface: it covers both
+    # ``Refinable()`` class-attribute instances *and* methods decorated
+    # with ``@refinable`` / ``@evaluated_refinable`` (e.g. ``Table.preprocess_row``).
+    declared = getattr(cls, "_declarative_refinable", None)
+    if declared:
+        for n in sorted(declared):
+            refinables[n] = _classify(n, declared[n], meta.get(n), annotations.get(n))
+
     for n in sorted(dir(cls)):
+        if n in refinables:
+            continue
         v = getattr(cls, n, None)
-        if isinstance(v, IommiRefinable):
+        if isinstance(v, IommiRefinable) or is_refinable_function(v):
             refinables[n] = _classify(n, v, meta.get(n), annotations.get(n))
 
     qualname = _qual(cls)

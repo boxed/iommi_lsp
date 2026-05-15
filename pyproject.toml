@@ -20,6 +20,11 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    # Runtime targets the LSP analyzes — tests reflect against real iommi
+    # and run ``ty check`` on Django-importing fixtures, so both must be
+    # importable in CI.
+    "django>=5.0",
+    "iommi>=7.0",
 ]
 
 [project.scripts]

@@ -173,6 +173,22 @@ def test_reflector_classifies_cell_as_traditional_class():
     assert {"url", "url_title", "value", "contents", "format", "link"} <= members
 
 
+def test_reflector_picks_up_refinable_decorated_methods():
+    """``@refinable`` (and ``@evaluated_refinable``) on a method declares
+    a refinable just like ``Refinable()`` does. The reflector must surface
+    those names too, otherwise valid usages like
+    ``Table(preprocess_row=lambda row, **_: row)`` get flagged as
+    ``unknown-iommi-refinable``.
+    """
+    from iommi_lsp.analyzers.iommi.reflect import build
+
+    g = build()
+    table = g.get("iommi.table.Table")
+    assert "preprocess_row" in table.refinables
+    assert "preprocess_rows" in table.refinables
+    assert "post_bulk_edit" in table.refinables
+
+
 def test_collect_init_members_handles_decorated_init():
     """Cell's ``__init__`` is wrapped by ``@dispatch``. _collect_init_members
     must unwrap so the source can still be AST-parsed.
