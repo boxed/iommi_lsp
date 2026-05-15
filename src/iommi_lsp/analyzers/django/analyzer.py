@@ -549,6 +549,15 @@ class DjangoAnalyzer:
             except Exception:
                 _log.exception("choices-enum check crashed; keeping the diagnostic")
                 return False
+        if (
+            _is_unsupported_operator(diagnostic)
+            and self.config.is_rule_enabled("f_operator")
+        ):
+            try:
+                return self._is_combinable_operator(uri, diagnostic)
+            except Exception:
+                _log.exception("f-operator check crashed; keeping the diagnostic")
+                return False
         if not _is_unresolved_attribute(diagnostic):
             return False
         try:
@@ -577,6 +586,30 @@ class DjangoAnalyzer:
         if cls is None:
             return False
         return any(_base_is_choices(b) for b in cls.bases)
+
+    def _is_combinable_operator(self, uri: str, diagnostic: Diagnostic) -> bool:
+        """Suppress ty's ``unsupported-operator`` when either operand is a
+        Django :class:`Combinable` expression.
+
+        ``F('x') + timedelta(...)``, ``datetime.now() - F('x')``,
+        ``-F('x')``, ``F('a') * F('b')``, ``Value(1) + F('x')``… Django's
+        ``Combinable`` base overloads the arithmetic operators (plus
+        ``__neg__`` and ``__invert__``) and swallows whatever's on the
+        other side into ``Value(...)``. ty doesn't know that — when it
+        sees ``datetime - F``, it checks ``datetime.__sub__``, finds no
+        ``F`` overload, and emits a false positive. Python would fall
+        back to ``F.__rsub__`` at runtime, which accepts anything.
+        """
+        path = _uri_to_path(uri)
+        if path is None:
+            return False
+        parsed = self._parse(uri, path)
+        if parsed is None:
+            return False
+        op_node = _find_op_at(parsed.tree, diagnostic.get("range") or {})
+        if op_node is None:
+            return False
+        return _op_involves_combinable(op_node)
 
     def _is_first_request_param(self, uri: str, diagnostic: Diagnostic) -> bool:
         path = _uri_to_path(uri)
@@ -1219,6 +1252,114 @@ def _base_is_choices(base: ast.expr) -> bool:
     if isinstance(base, ast.Attribute):
         return base.attr in _CHOICES_BASE_NAMES
     return False
+
+
+# Django expression factories whose return value is a Combinable —
+# i.e. arithmetic operators on the result combine into a CombinedExpression
+# rather than going through the operand's regular dunder protocol.
+# Slightly redundant with ``_STRING_FIELD_PATH_FUNCS`` (which is the
+# subset that takes a ``"field__path"`` string) but listing them out
+# here keeps the operator-filter intent obvious. ``ExpressionWrapper``
+# and ``Cast`` wrap an inner expression and preserve Combinable-ness.
+_COMBINABLE_FACTORY_NAMES: frozenset[str] = frozenset({
+    "F", "Value", "Func", "OuterRef", "Subquery", "ExpressionWrapper",
+    "Case", "When", "Cast",
+    "Count", "Sum", "Avg", "Min", "Max", "StdDev", "Variance",
+    "Coalesce", "Greatest", "Least", "Concat", "Length", "Lower", "Upper",
+    "Substr", "Now", "Trunc", "TruncDate", "TruncTime",
+    "TruncDay", "TruncMonth", "TruncYear",
+    "TruncHour", "TruncMinute", "TruncSecond",
+    "ExtractYear", "ExtractMonth", "ExtractDay",
+    "ExtractWeek", "ExtractWeekDay", "ExtractIsoYear", "ExtractIsoWeekDay",
+    "ExtractHour", "ExtractMinute", "ExtractSecond", "ExtractQuarter",
+})
+
+
+def _is_unsupported_operator(diagnostic: Diagnostic) -> bool:
+    code = diagnostic.get("code")
+    if isinstance(code, str) and code == "unsupported-operator":
+        return True
+    if isinstance(code, dict) and code.get("value") == "unsupported-operator":
+        return True
+    return False
+
+
+def _expr_returns_combinable(node: ast.AST) -> bool:
+    """Return True if *node* is, or evaluates to, a Django Combinable.
+
+    Recurses through arithmetic ``BinOp`` / ``UnaryOp`` chains because
+    Combinable.__add__ / __sub__ / etc. return another CombinedExpression
+    — once F is involved, the whole chain is Combinable. Also recognises
+    ``some_expr.bitand(other)``, ``.asc()``, ``.desc()`` and similar
+    methods Django defines on Combinable.
+    """
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in _COMBINABLE_FACTORY_NAMES:
+            return True
+        if isinstance(func, ast.Attribute):
+            if func.attr in _COMBINABLE_FACTORY_NAMES:
+                return True
+            # ``<expr>.bitand(...)``, ``<expr>.bitor(...)``, ``<expr>.asc()``…
+            # — Combinable methods that keep the result Combinable.
+            if func.attr in _COMBINABLE_METHOD_NAMES:
+                return _expr_returns_combinable(func.value)
+    if isinstance(node, ast.BinOp):
+        return _expr_returns_combinable(node.left) or _expr_returns_combinable(node.right)
+    if isinstance(node, ast.UnaryOp):
+        return _expr_returns_combinable(node.operand)
+    if isinstance(node, ast.Subscript):
+        # ``F('name')[1:5]`` — string-slice on Combinable returns Combinable.
+        return _expr_returns_combinable(node.value)
+    return False
+
+
+_COMBINABLE_METHOD_NAMES: frozenset[str] = frozenset({
+    "bitand", "bitor", "bitxor", "bitleftshift", "bitrightshift",
+    "asc", "desc",
+})
+
+
+def _op_involves_combinable(node: ast.AST) -> bool:
+    """``BinOp`` / ``UnaryOp`` / ``Compare`` where any operand is Combinable."""
+    if isinstance(node, ast.BinOp):
+        return _expr_returns_combinable(node.left) or _expr_returns_combinable(node.right)
+    if isinstance(node, ast.UnaryOp):
+        return _expr_returns_combinable(node.operand)
+    if isinstance(node, ast.Compare):
+        if _expr_returns_combinable(node.left):
+            return True
+        return any(_expr_returns_combinable(c) for c in node.comparators)
+    return False
+
+
+def _find_op_at(tree: ast.Module, range_: dict) -> ast.AST | None:
+    """Find the smallest ``BinOp``/``UnaryOp``/``Compare`` containing the LSP range."""
+    start = range_.get("start") or {}
+    end = range_.get("end") or {}
+    s_line = int(start.get("line", 0)) + 1
+    s_col = int(start.get("character", 0))
+    e_line = int(end.get("line", s_line - 1)) + 1
+    e_col = int(end.get("character", s_col))
+
+    best: ast.AST | None = None
+    best_size = (10**9, 10**9)
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.BinOp, ast.UnaryOp, ast.Compare)):
+            continue
+        nl = node.lineno
+        nc = node.col_offset
+        nel = node.end_lineno or nl
+        nec = node.end_col_offset or nc
+        if (nl, nc) > (s_line, s_col):
+            continue
+        if (nel, nec) < (e_line, e_col):
+            continue
+        size = (nel - nl, nec - nc)
+        if size < best_size:
+            best = node
+            best_size = size
+    return best
 
 
 def _is_unused_request(diagnostic: Diagnostic) -> bool:
