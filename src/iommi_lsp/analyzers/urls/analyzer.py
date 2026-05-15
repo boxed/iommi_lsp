@@ -497,10 +497,12 @@ def _scan_diagnostics(source: str, index: UrlIndex):
         const_node, value = target
         if value in index.entries:
             continue
-        # Heuristic: redirect() may receive a path (e.g. "/foo/") or a
-        # full URL; if the value contains "/" or "://" treat it as
-        # non-name. Same for ``resolve_url``.
-        if callee in {"redirect", "resolve_url"} and ("/" in value or "://" in value):
+        # Heuristic: redirect() may receive a path (e.g. "/foo/"), a
+        # full URL, or a relative path ("." / ".."); treat any of those
+        # as non-name. Same for ``resolve_url``.
+        if callee in {"redirect", "resolve_url"} and (
+            "/" in value or value in {".", ".."}
+        ):
             continue
         # Skip empty strings — common during typing.
         if not value:

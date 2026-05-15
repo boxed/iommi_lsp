@@ -242,6 +242,20 @@ def test_diagnostic_redirect_to_full_url_is_silent(
     assert analyzer.additional_diagnostics(f.as_uri()) == []
 
 
+def test_diagnostic_redirect_to_dot_is_silent(analyzer, tmp_path: Path) -> None:
+    src = "from django.shortcuts import redirect\nredirect('.')\n"
+    f = tmp_path / "use.py"
+    f.write_text(src)
+    assert analyzer.additional_diagnostics(f.as_uri()) == []
+
+
+def test_diagnostic_redirect_to_dotdot_is_silent(analyzer, tmp_path: Path) -> None:
+    src = "from django.shortcuts import redirect\nredirect('..')\n"
+    f = tmp_path / "use.py"
+    f.write_text(src)
+    assert analyzer.additional_diagnostics(f.as_uri()) == []
+
+
 def test_diagnostic_variable_arg_is_silent(analyzer, tmp_path: Path) -> None:
     src = "from django.urls import reverse\nx = 'about'\nreverse(x)\n"
     f = tmp_path / "use.py"
