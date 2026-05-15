@@ -1019,6 +1019,77 @@ def test_non_fk_id_attribute_on_annotated_param_is_kept(tmp_path: Path):
     assert a.is_false_positive(f.as_uri(), diag) is False
 
 
+def test_fk_id_accessor_on_chained_queryset_first_is_dropped(tmp_path: Path):
+    """`p = Profile.objects.filter(...).first(); p.user_id` — instance
+    bound from a chained queryset call. Common real-world shape; the
+    flow resolver must walk through queryset-returning methods to the
+    manager."""
+    src = (
+        "from myapp.models import Profile\n"
+        "\n"
+        "def f():\n"
+        "    p = Profile.objects.filter(bio='x').first()\n"
+        "    return p.user_id\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 4
+    start = src.splitlines()[line].index("user_id")
+    diag = _diag(line, start, start + len("user_id"), "user_id")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_fk_id_accessor_on_deeply_chained_queryset_is_dropped(tmp_path: Path):
+    """Several queryset-returning methods chained before the terminal
+    instance-returning call."""
+    src = (
+        "from myapp.models import Profile\n"
+        "\n"
+        "def f():\n"
+        "    p = Profile.objects.filter(bio='x').exclude(bio='y').order_by('bio').first()\n"
+        "    return p.user_id\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 4
+    start = src.splitlines()[line].index("user_id")
+    diag = _diag(line, start, start + len("user_id"), "user_id")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_unknown_fk_id_on_chained_queryset_is_kept(tmp_path: Path):
+    """Chain-resolved receiver still rejects a genuinely-unknown
+    ``<name>_id`` accessor (no ``bogus`` FK on Profile)."""
+    src = (
+        "from myapp.models import Profile\n"
+        "\n"
+        "def f():\n"
+        "    p = Profile.objects.filter(bio='x').first()\n"
+        "    return p.bogus_id\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 4
+    start = src.splitlines()[line].index("bogus_id")
+    diag = _diag(line, start, start + len("bogus_id"), "bogus_id")
+
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
 def test_unknown_fk_id_on_annotated_param_is_kept(tmp_path: Path):
     """`p.bogus_id` where `bogus` is not an FK on Profile — real bug."""
     src = (

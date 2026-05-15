@@ -498,6 +498,289 @@ def test_class_meta_traditional_cell_chain(traditional_workspace: Path):
     assert "val" in d["message"]
 
 
+# ---------------------------------------------------------------------------
+# Table(header__...) / Column(header__...). ``Table.header`` is declared
+# as a bare ``Refinable()`` but at runtime ``on_refine_done`` unpacks it
+# into a ``HeaderConfig``; static reflection would otherwise classify it
+# as a scalar leaf and reject every valid ``header__template=``-style
+# usage. ``Column.header: Namespace = EvaluatedRefinable()`` is the same
+# story for ``HeaderColumnConfig``.
+# ---------------------------------------------------------------------------
+
+
+def _make_header_config_graph() -> IommiGraph:
+    """Graph that mirrors the real-iommi shape after the class_ref
+    override is applied: ``Table.header`` / ``Column.header`` /
+    ``Table.superheader`` all class_ref into HeaderConfig/HeaderColumnConfig."""
+    header_config = IommiClass(
+        qualname="iommi.table.HeaderConfig",
+        bases=[],
+        refinables={
+            "tag": _r("tag", "evaluated_scalar"),
+            "template": _r("template", "evaluated_scalar"),
+            "include": _r("include", "evaluated_scalar"),
+            "extra": _r("extra", "open_namespace"),
+            "extra_evaluated": _r("extra_evaluated", "open_namespace"),
+            "attrs": _r(
+                "attrs", "html_attrs",
+                sub_specials={
+                    "class": {"value_type": "bool"},
+                    "style": {"value_type": "str"},
+                },
+            ),
+        },
+    )
+    header_column_config = IommiClass(
+        qualname="iommi.table.HeaderColumnConfig",
+        bases=[],
+        refinables={
+            "template": _r("template", "evaluated_scalar"),
+            "url": _r("url", "evaluated_scalar"),
+            "attrs": _r(
+                "attrs", "html_attrs",
+                sub_specials={
+                    "class": {"value_type": "bool"},
+                    "style": {"value_type": "str"},
+                },
+            ),
+        },
+    )
+    column = IommiClass(
+        qualname="iommi.table.Column",
+        bases=[],
+        refinables={
+            "header": _r(
+                "header", "class_ref", target="iommi.table.HeaderColumnConfig",
+            ),
+        },
+    )
+    table = IommiClass(
+        qualname="iommi.table.Table",
+        bases=[],
+        refinables={
+            "columns": _r(
+                "columns", "members", member_class="iommi.table.Column",
+            ),
+            "header": _r("header", "class_ref", target="iommi.table.HeaderConfig"),
+            "superheader": _r(
+                "superheader", "class_ref", target="iommi.table.HeaderConfig",
+            ),
+        },
+    )
+    return IommiGraph(
+        iommi_version="0.0-test",
+        classes={c.qualname: c for c in [
+            table, column, header_config, header_column_config,
+        ]},
+    )
+
+
+@pytest.fixture
+def header_workspace(tmp_path: Path) -> Path:
+    save_graph(_make_header_config_graph(), tmp_path / GRAPH_FILENAME)
+    return tmp_path
+
+
+def test_table_header_template_ok(header_workspace: Path):
+    """``Table(header__template=...)`` is the user-reported regression —
+    must validate cleanly."""
+    diags = _diagnose(header_workspace, """
+        from iommi import Table
+
+        Table(header__template='custom.html')
+    """)
+    assert diags == []
+
+
+def test_table_header_tag_ok(header_workspace: Path):
+    diags = _diagnose(header_workspace, """
+        from iommi import Table
+
+        Table(header__tag='div')
+    """)
+    assert diags == []
+
+
+def test_table_header_include_ok(header_workspace: Path):
+    diags = _diagnose(header_workspace, """
+        from iommi import Table
+
+        Table(header__include=False)
+    """)
+    assert diags == []
+
+
+def test_table_header_extra_ok(header_workspace: Path):
+    """``extra``/``extra_evaluated`` are open buckets — any sub-key OK."""
+    diags = _diagnose(header_workspace, """
+        from iommi import Table
+
+        Table(
+            header__extra__custom_key=1,
+            header__extra_evaluated__custom=lambda **_: 2,
+        )
+    """)
+    assert diags == []
+
+
+def test_table_header_attrs_class_ok(header_workspace: Path):
+    diags = _diagnose(header_workspace, """
+        from iommi import Table
+
+        Table(header__attrs__class__bold=True)
+    """)
+    assert diags == []
+
+
+def test_table_header_attrs_style_ok(header_workspace: Path):
+    diags = _diagnose(header_workspace, """
+        from iommi import Table
+
+        Table(header__attrs__style__color='red')
+    """)
+    assert diags == []
+
+
+def test_table_header_attrs_direct_attribute_ok(header_workspace: Path):
+    diags = _diagnose(header_workspace, """
+        from iommi import Table
+
+        Table(header__attrs__data_section='hi')
+    """)
+    assert diags == []
+
+
+def test_table_header_unknown_refinable_flagged(header_workspace: Path):
+    """Unknown sub-refinable on HeaderConfig surfaces the available list."""
+    diags = _diagnose(header_workspace, """
+        from iommi import Table
+
+        Table(header__bogus_thing=1)
+    """)
+    assert len(diags) == 1
+    d = diags[0]
+    assert d["data"]["outcome"] == "unknown_refinable"
+    assert d["data"]["on_class"] == "iommi.table.HeaderConfig"
+    assert "bogus_thing" in d["message"]
+    assert "template" in d["data"]["available"]
+
+
+def test_table_header_chain_past_template_flagged(header_workspace: Path):
+    """``header__template`` is a scalar leaf — nothing past it."""
+    src_template = """
+        from iommi import Table
+
+        Table(header__template__nope=1)
+    """
+    diags = _diagnose(header_workspace, src_template)
+    assert len(diags) == 1
+    d = diags[0]
+    assert d["data"]["outcome"] == "trailing_segments_after_leaf"
+    assert "nope" in d["message"]
+    # The diagnostic pins to the bad segment within the kwarg.
+    src = (header_workspace / "usage.py").read_text()
+    line = src.splitlines()[d["range"]["start"]["line"]]
+    col_start = d["range"]["start"]["character"]
+    col_end = d["range"]["end"]["character"]
+    assert line[col_start:col_end] == "nope"
+
+
+def test_table_superheader_template_ok(header_workspace: Path):
+    """``Table.superheader`` is configured via ``with_defaults`` at runtime
+    with ``superheader__template=...`` and ``superheader__attrs__class__...``
+    — the override class_refs it to HeaderConfig so those refinements pass."""
+    diags = _diagnose(header_workspace, """
+        from iommi import Table
+
+        Table(
+            superheader__template='x.html',
+            superheader__attrs__class__superheader=True,
+        )
+    """)
+    assert diags == []
+
+
+def test_column_header_template_ok(header_workspace: Path):
+    diags = _diagnose(header_workspace, """
+        from iommi import Column
+
+        Column(header__template='col-header.html')
+    """)
+    assert diags == []
+
+
+def test_column_header_url_ok(header_workspace: Path):
+    """``HeaderColumnConfig.url`` is a refinable not present on the table
+    header — make sure the right config class is consulted per ``header``."""
+    diags = _diagnose(header_workspace, """
+        from iommi import Column
+
+        Column(header__url='/sort')
+    """)
+    assert diags == []
+
+
+def test_column_header_attrs_ok(header_workspace: Path):
+    diags = _diagnose(header_workspace, """
+        from iommi import Column
+
+        Column(header__attrs__class__numeric=True)
+    """)
+    assert diags == []
+
+
+def test_column_header_unknown_refinable_flagged(header_workspace: Path):
+    """``Column.header`` walks into HeaderColumnConfig, not HeaderConfig —
+    a HeaderConfig-only key like ``tag`` should be flagged here."""
+    diags = _diagnose(header_workspace, """
+        from iommi import Column
+
+        Column(header__tag='div')
+    """)
+    assert len(diags) == 1
+    d = diags[0]
+    assert d["data"]["outcome"] == "unknown_refinable"
+    assert d["data"]["on_class"] == "iommi.table.HeaderColumnConfig"
+    assert "tag" in d["message"]
+
+
+def test_column_header_inside_columns_chain_ok(header_workspace: Path):
+    """The chain ``columns__name__header__template`` works through members."""
+    diags = _diagnose(header_workspace, """
+        from iommi import Table
+
+        Table(columns__name__header__template='c.html')
+    """)
+    assert diags == []
+
+
+def test_table_class_meta_header_template_ok(header_workspace: Path):
+    """The same chain through ``class Meta`` — declarative configuration."""
+    diags = _diagnose(header_workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            class Meta:
+                header__template = 'custom.html'
+                header__attrs__class__sticky = True
+                superheader__template = 'super.html'
+    """)
+    assert diags == []
+
+
+def test_class_meta_header_unknown_refinable_flagged(header_workspace: Path):
+    diags = _diagnose(header_workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            class Meta:
+                header__bogus_thing = 1
+    """)
+    assert len(diags) == 1
+    assert diags[0]["data"]["on_class"] == "iommi.table.HeaderConfig"
+    assert "bogus_thing" in diags[0]["message"]
+
+
 def test_class_meta_kwargs_and_call_kwargs_coexist(workspace: Path):
     """Meta validation must not interfere with the existing kwarg
     diagnostics on the same file."""

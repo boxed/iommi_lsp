@@ -412,3 +412,165 @@ def test_non_attrs_chain_past_scalar_still_fails(
     assert isinstance(res, Problem)
     assert res.outcome == "trailing_segments_after_leaf"
     assert res.bad_segment == "bogus"
+
+
+# ---------------------------------------------------------------------------
+# ``Table.header`` / ``Column.header`` after the reflect-time override
+# promotes them to ``class_ref`` against HeaderConfig / HeaderColumnConfig.
+# These tests pin the walker's behavior so a regression in the override
+# (or a structural rename in iommi) gets caught here, separately from the
+# integration tests against the real graph.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def graph_with_header_class_ref() -> IommiGraph:
+    """Mirror the post-override shape: Table.header / Column.header /
+    Table.superheader all class_ref into header config classes that
+    declare a realistic field set."""
+    header_config = IommiClass(
+        qualname="x.HeaderConfig",
+        bases=[],
+        refinables={
+            "tag": _r("tag", "evaluated_scalar"),
+            "template": _r("template", "evaluated_scalar"),
+            "include": _r("include", "evaluated_scalar"),
+            "extra": _r("extra", "open_namespace"),
+            "extra_evaluated": _r("extra_evaluated", "open_namespace"),
+            "attrs": _r(
+                "attrs", "html_attrs",
+                sub_specials={
+                    "class": {"value_type": "bool"},
+                    "style": {"value_type": "str"},
+                },
+            ),
+        },
+    )
+    header_column_config = IommiClass(
+        qualname="x.HeaderColumnConfig",
+        bases=[],
+        refinables={
+            "template": _r("template", "evaluated_scalar"),
+            "url": _r("url", "evaluated_scalar"),
+            "attrs": _r(
+                "attrs", "html_attrs",
+                sub_specials={
+                    "class": {"value_type": "bool"},
+                    "style": {"value_type": "str"},
+                },
+            ),
+        },
+    )
+    column = IommiClass(
+        qualname="x.Column",
+        bases=[],
+        refinables={
+            "header": _r("header", "class_ref", target="x.HeaderColumnConfig"),
+        },
+    )
+    table = IommiClass(
+        qualname="x.Table",
+        bases=[],
+        refinables={
+            "columns": _r("columns", "members", member_class="x.Column"),
+            "header": _r("header", "class_ref", target="x.HeaderConfig"),
+            "superheader": _r("superheader", "class_ref", target="x.HeaderConfig"),
+        },
+    )
+    return IommiGraph(classes={c.qualname: c for c in [
+        table, column, header_config, header_column_config,
+    ]})
+
+
+def test_header_class_ref_template_ok(graph_with_header_class_ref):
+    """``Table(header__template=...)`` — the user-reported regression."""
+    assert walk(graph_with_header_class_ref, "x.Table",
+                ["header", "template"]) is OK
+
+
+def test_header_class_ref_tag_ok(graph_with_header_class_ref):
+    assert walk(graph_with_header_class_ref, "x.Table",
+                ["header", "tag"]) is OK
+
+
+def test_header_class_ref_include_ok(graph_with_header_class_ref):
+    assert walk(graph_with_header_class_ref, "x.Table",
+                ["header", "include"]) is OK
+
+
+def test_header_class_ref_extra_open_namespace_ok(graph_with_header_class_ref):
+    """``extra``/``extra_evaluated`` accept any sub-key."""
+    assert walk(graph_with_header_class_ref, "x.Table",
+                ["header", "extra", "any_user_key"]) is OK
+    assert walk(graph_with_header_class_ref, "x.Table",
+                ["header", "extra_evaluated", "any_user_key"]) is OK
+
+
+def test_header_class_ref_attrs_class_ok(graph_with_header_class_ref):
+    assert walk(graph_with_header_class_ref, "x.Table",
+                ["header", "attrs", "class", "bold"]) is OK
+
+
+def test_header_class_ref_attrs_direct_ok(graph_with_header_class_ref):
+    assert walk(graph_with_header_class_ref, "x.Table",
+                ["header", "attrs", "data_section"]) is OK
+
+
+def test_header_class_ref_unknown_subkey_fails(graph_with_header_class_ref):
+    res = walk(graph_with_header_class_ref, "x.Table",
+               ["header", "bogus"])
+    assert isinstance(res, Problem)
+    assert res.outcome == "unknown_refinable"
+    assert res.bad_segment == "bogus"
+    assert res.on_class == "x.HeaderConfig"
+    assert "template" in res.available
+
+
+def test_header_class_ref_trailing_past_template_fails(graph_with_header_class_ref):
+    """``template`` is a scalar leaf inside HeaderConfig — nothing past it."""
+    res = walk(graph_with_header_class_ref, "x.Table",
+               ["header", "template", "nope"])
+    assert isinstance(res, Problem)
+    assert res.outcome == "trailing_segments_after_leaf"
+    assert res.bad_segment == "nope"
+
+
+def test_superheader_class_ref_template_ok(graph_with_header_class_ref):
+    """Table.superheader points at the same HeaderConfig — same surface."""
+    assert walk(graph_with_header_class_ref, "x.Table",
+                ["superheader", "template"]) is OK
+    assert walk(graph_with_header_class_ref, "x.Table",
+                ["superheader", "attrs", "class", "superheader"]) is OK
+
+
+def test_column_header_class_ref_url_ok(graph_with_header_class_ref):
+    """HeaderColumnConfig has ``url`` but no ``tag`` — verify the right
+    config class is consulted for ``Column.header`` vs ``Table.header``."""
+    assert walk(graph_with_header_class_ref, "x.Column",
+                ["header", "url"]) is OK
+
+
+def test_column_header_class_ref_template_ok(graph_with_header_class_ref):
+    assert walk(graph_with_header_class_ref, "x.Column",
+                ["header", "template"]) is OK
+
+
+def test_column_header_class_ref_unknown_tag_fails(graph_with_header_class_ref):
+    """``tag`` lives on HeaderConfig only — flagged on Column.header."""
+    res = walk(graph_with_header_class_ref, "x.Column",
+               ["header", "tag"])
+    assert isinstance(res, Problem)
+    assert res.outcome == "unknown_refinable"
+    assert res.on_class == "x.HeaderColumnConfig"
+    assert "url" in res.available
+
+
+def test_column_header_class_ref_through_columns_chain(graph_with_header_class_ref):
+    """``columns__name__header__template`` — the full chain through a
+    members refinable into the per-column header config."""
+    assert walk(graph_with_header_class_ref, "x.Table",
+                ["columns", "name", "header", "template"]) is OK
+    assert walk(graph_with_header_class_ref, "x.Table",
+                ["columns", "name", "header", "url"]) is OK
+    assert walk(graph_with_header_class_ref, "x.Table",
+                ["columns", "name", "header", "attrs", "class", "x"]) is OK

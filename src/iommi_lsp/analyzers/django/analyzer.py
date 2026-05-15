@@ -470,7 +470,7 @@ class DjangoAnalyzer:
         return None
 
     def _infer_call_result_model(self, value: ast.AST) -> ModelInfo | None:
-        """Recognise ``Model(...)`` and ``Model.objects.<method>(...)``."""
+        """Recognise ``Model(...)`` and ``Model.objects.<chain>.<method>(...)``."""
         # ``get_user_model()`` / ``django.contrib.auth.get_user_model()`` —
         # Django's runtime AUTH_USER_MODEL resolver. We can't read the
         # project's setting statically, but the builtin contrib User is
@@ -481,18 +481,14 @@ class DjangoAnalyzer:
         # Model(...) — direct instantiation.
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
             return self.django_index.lookup(value.func.id)
-        # Model.objects.<method>(...) — manager call.
+        # ``Model.objects.<...>.<terminal>(...)`` — terminal returns an
+        # instance, the prefix may include any number of queryset-returning
+        # methods (``filter``/``exclude``/``order_by``/...).
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
             method = value.func.attr
             if method not in _QUERY_METHODS_RETURNING_INSTANCE:
                 return None
-            mgr = value.func.value
-            if (
-                isinstance(mgr, ast.Attribute)
-                and mgr.attr in {"objects", "_default_manager", "_base_manager"}
-                and isinstance(mgr.value, ast.Name)
-            ):
-                return self.django_index.lookup(mgr.value.id)
+            return self._infer_iter_yields_model(value.func.value)
         return None
 
     def _attr_is_magic(self, model: ModelInfo, attr_name: str) -> bool:

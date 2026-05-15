@@ -214,6 +214,60 @@ def test_reflector_classifies_extra_and_extra_evaluated_as_open_namespace():
     assert seen > 0
 
 
+def test_reflector_classifies_header_as_class_ref():
+    """``Table.header`` is declared as a bare ``Refinable()`` with no
+    annotation and no Meta default. Static reflection alone would mark
+    it as a scalar leaf and reject ``Table(header__template=...)``.
+    The override patches it to ``class_ref`` -> HeaderConfig, and the
+    BFS walk pulls HeaderConfig into the graph with its full surface
+    (template, tag, include, extra, attrs, ...).
+    """
+    from iommi_lsp.analyzers.iommi.reflect import build
+
+    g = build()
+
+    table = g.get("iommi.table.Table")
+    header = table.refinables["header"]
+    assert header.kind == "class_ref"
+    assert header.target == "iommi.table.HeaderConfig"
+
+    # Same override for superheader — runtime accesses .attrs and
+    # .template on it via with_defaults config.
+    superheader = table.refinables["superheader"]
+    assert superheader.kind == "class_ref"
+    assert superheader.target == "iommi.table.HeaderConfig"
+
+    # Column.header points at HeaderColumnConfig instead, which has
+    # ``url`` and ``template`` but not ``tag``/``include``.
+    col = g.get("iommi.table.Column")
+    col_header = col.refinables["header"]
+    assert col_header.kind == "class_ref"
+    assert col_header.target == "iommi.table.HeaderColumnConfig"
+
+    # BFS must have pulled both Config classes into the graph; their
+    # refinables drive the per-segment validation downstream.
+    assert g.has("iommi.table.HeaderConfig")
+    assert g.has("iommi.table.HeaderColumnConfig")
+
+    header_config = g.get("iommi.table.HeaderConfig")
+    assert "template" in header_config.refinables
+    assert "tag" in header_config.refinables
+    assert "include" in header_config.refinables
+    assert "attrs" in header_config.refinables
+    assert header_config.refinables["attrs"].kind == "html_attrs"
+    # ``extra``/``extra_evaluated`` get the open_namespace treatment via
+    # the existing classifier hook.
+    assert header_config.refinables["extra"].kind == "open_namespace"
+    assert header_config.refinables["extra_evaluated"].kind == "open_namespace"
+
+    header_col_config = g.get("iommi.table.HeaderColumnConfig")
+    assert "template" in header_col_config.refinables
+    assert "url" in header_col_config.refinables
+    assert "attrs" in header_col_config.refinables
+    # ``tag`` is unique to the table-level HeaderConfig.
+    assert "tag" not in header_col_config.refinables
+
+
 def test_collect_init_members_handles_decorated_init():
     """Cell's ``__init__`` is wrapped by ``@dispatch``. _collect_init_members
     must unwrap so the source can still be AST-parsed.

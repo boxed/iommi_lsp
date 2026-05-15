@@ -35,6 +35,31 @@ _TRADITIONAL_TARGETS: dict[str, dict[str, str]] = {
 }
 
 
+# Manual overrides for refinables that static reflection classifies as a
+# scalar leaf but at runtime get unpacked into a ``RefinableObject``
+# subclass via ``on_refine_done``. ``Table.header = Refinable()`` is the
+# canonical example: the slot is declared as a bare ``Refinable()`` (no
+# annotation, no Meta default), but ``on_refine_done`` calls
+# ``HeaderConfig(**self.header).refine_done(...)``. Without this override
+# the walker would reject ``Table(header__template=...)`` as a chain past
+# a leaf.
+_CLASS_REF_OVERRIDES: dict[str, dict[str, str]] = {
+    "iommi.table.Table": {
+        "header": "iommi.table.HeaderConfig",
+        # ``superheader`` is a plain Namespace at runtime, but the
+        # ``with_defaults`` set on ``Table.__init__`` configures it via
+        # ``superheader__attrs__class__superheader`` and
+        # ``superheader__template``. Pointing at HeaderConfig accepts
+        # those, plus the rest of HeaderConfig's surface — slight
+        # over-acceptance is fine; the alternative is false positives.
+        "superheader": "iommi.table.HeaderConfig",
+    },
+    "iommi.table.Column": {
+        "header": "iommi.table.HeaderColumnConfig",
+    },
+}
+
+
 # Default seed: the names you'd reach via ``from iommi import ...``.
 DEFAULT_SEEDS: tuple[str, ...] = (
     "iommi.Table",
@@ -270,6 +295,30 @@ def _apply_traditional_overrides(
         )
 
 
+def _apply_class_ref_overrides(
+    cls_qualname: str, refinables: dict[str, Refinable]
+) -> None:
+    """Rewrite specific refinables to ``class_ref`` kind in place.
+
+    For slots like ``Table.header`` that the runtime unpacks into a
+    ``RefinableObject`` subclass (``HeaderConfig``) but static reflection
+    has classified as a scalar leaf because the ``Refinable()`` declaration
+    carries no annotation and no Meta default.
+    """
+    overrides = _CLASS_REF_OVERRIDES.get(cls_qualname)
+    if not overrides:
+        return
+    for name, target in overrides.items():
+        existing = refinables.get(name)
+        rtype = existing.refinable_type if existing is not None else ""
+        refinables[name] = Refinable(
+            name=name,
+            kind="class_ref",
+            refinable_type=rtype,
+            target=target,
+        )
+
+
 def _reflect_class(cls: type) -> IommiClass:
     from iommi.refinable import Refinable as IommiRefinable
     from iommi.refinable import is_refinable_function
@@ -299,6 +348,7 @@ def _reflect_class(cls: type) -> IommiClass:
 
     qualname = _qual(cls)
     _apply_traditional_overrides(qualname, refinables)
+    _apply_class_ref_overrides(qualname, refinables)
 
     return IommiClass(
         qualname=qualname,

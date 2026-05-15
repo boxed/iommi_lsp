@@ -1483,8 +1483,9 @@
           "refinable_type": "EvaluatedRefinable"
         },
         "header": {
-          "kind": "evaluated_scalar",
-          "refinable_type": "EvaluatedRefinable"
+          "kind": "class_ref",
+          "refinable_type": "EvaluatedRefinable",
+          "target": "iommi.table.HeaderColumnConfig"
         },
         "include": {
           "kind": "scalar",
@@ -1527,6 +1528,101 @@
           "refinable_type": "EvaluatedRefinable"
         },
         "superheader": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.table.HeaderColumnConfig": {
+      "bases": [
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.table.HeaderColumnConfig",
+      "refinables": {
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "template": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "url": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        }
+      }
+    },
+    "iommi.table.HeaderConfig": {
+      "bases": [
+        "iommi.traversable.Traversable",
+        "iommi.refinable.RefinableObject",
+        "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
+      "qualname": "iommi.table.HeaderConfig",
+      "refinables": {
+        "attrs": {
+          "kind": "html_attrs",
+          "refinable_type": "SpecialEvaluatedRefinable",
+          "sub_specials": {
+            "class": {
+              "value_type": "bool"
+            },
+            "style": {
+              "value_type": "str"
+            }
+          }
+        },
+        "extra": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_evaluated": {
+          "kind": "open_namespace",
+          "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
+        "include": {
+          "kind": "scalar",
+          "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "iommi_style": {
+          "kind": "scalar",
+          "refinable_type": "Refinable"
+        },
+        "tag": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "EvaluatedRefinable"
+        },
+        "template": {
           "kind": "evaluated_scalar",
           "refinable_type": "EvaluatedRefinable"
         }
@@ -1780,8 +1876,9 @@
           "target": "iommi.fragment.Fragment"
         },
         "header": {
-          "kind": "scalar",
-          "refinable_type": "Refinable"
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.table.HeaderConfig"
         },
         "include": {
           "kind": "scalar",
@@ -1870,8 +1967,9 @@
           "refinable_type": "function"
         },
         "superheader": {
-          "kind": "scalar",
-          "refinable_type": "Refinable"
+          "kind": "class_ref",
+          "refinable_type": "Refinable",
+          "target": "iommi.table.HeaderConfig"
         },
         "table_tag_wrapper": {
           "kind": "class_ref",
