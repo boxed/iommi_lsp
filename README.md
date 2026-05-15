@@ -288,7 +288,7 @@ if not configs.iommi_lsp then
   configs.iommi_lsp = {
     default_config = {
       cmd = { "iommi_lsp" },
-      filetypes = { "python" },
+      filetypes = { "python", "htmldjango", "html" },
       root_dir = lspconfig.util.root_pattern("pyproject.toml", ".git"),
       single_file_support = false,
     },
@@ -307,6 +307,10 @@ command = "iommi_lsp"
 [[language]]
 name = "python"
 language-servers = ["iommi_lsp"]
+
+[[language]]
+name = "html"
+language-servers = ["iommi_lsp"]
 ```
 
 ### Zed (`settings.json` under `lsp`)
@@ -320,6 +324,9 @@ language-servers = ["iommi_lsp"]
   },
   "languages": {
     "Python": {
+      "language_servers": ["iommi_lsp"]
+    },
+    "HTML": {
       "language_servers": ["iommi_lsp"]
     }
   }
