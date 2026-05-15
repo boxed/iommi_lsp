@@ -50,6 +50,16 @@ _QUERY_METHODS_RETURNING_INSTANCE = frozenset({
     "create", "get_or_create", "update_or_create",
 })
 
+# QuerySet methods that return another QuerySet of the same model — i.e.
+# iterating their result yields instances of the model. Used to resolve
+# the bound variable in ``for p in Model.objects.filter(...)`` and the
+# equivalent comprehension shape.
+_QUERY_METHODS_RETURNING_QUERYSET = frozenset({
+    "all", "filter", "exclude", "order_by", "reverse", "distinct",
+    "none", "using", "select_related", "prefetch_related",
+    "annotate", "alias", "defer", "only",
+})
+
 # Manager methods that take ``field__lookup=...`` kwargs we want to validate.
 # ``update``/``create`` only accept single-segment field names in real
 # Django — the walker is permissive about ``__`` traversal which means
@@ -175,17 +185,29 @@ class DjangoAnalyzer:
         if model is not None and self._attr_is_magic(model, attr_name):
             return True
 
-        # Narrow fallback for `<field>_id` on FK/OneToOne fields: ty knows
-        # the receiver's type from an annotation (parameter, `self` in a
-        # model method, annotated assignment) but our flow-based resolver
-        # doesn't follow annotations. We restrict this to fk_id to avoid
-        # masking real bugs like `instance.objects`.
+        # Narrow fallback for instance-only Django magic on annotated
+        # receivers: ty knows the receiver's type from an annotation
+        # (parameter, ``self`` in a model method, annotated assignment)
+        # but our flow-based resolver doesn't follow annotations. Two
+        # kinds of attr are safe to suppress this way — the names are
+        # registered in the index, so genuine typos still leak through:
+        #   * ``<field>_id`` underlying-column accessors on FK fields;
+        #   * reverse-relation accessors (``<lower>_set`` default and
+        #     explicit ``related_name=``).
         if (
             attr_name.endswith("_id")
             and self.config.is_rule_enabled("fk_id")
         ):
             ann_model = self._resolve_via_annotation(receiver, parsed.tree)
             if ann_model is not None and attr_name in ann_model.fk_id_accessors:
+                return True
+
+        if self.config.is_rule_enabled("reverse"):
+            ann_model = self._resolve_via_annotation(receiver, parsed.tree)
+            if (
+                ann_model is not None
+                and attr_name in self.django_index.reverse_attrs(ann_model.qualname)
+            ):
                 return True
 
         # ``<m2m>.through`` — Django attaches ``through`` to every
@@ -285,20 +307,63 @@ class DjangoAnalyzer:
         scope = _enclosing_function(tree, use_site)
         if scope is None:
             scope = tree
-        # Iterate assignments preceding the use site; last one wins.
-        last_match: ModelInfo | None = None
         use_pos = (getattr(use_site, "lineno", 0), getattr(use_site, "col_offset", 0))
+
+        # Comprehensions have their own scope — a ``for p in qs`` in a
+        # ListComp/DictComp/SetComp/GeneratorExp binds ``p`` only inside
+        # that comprehension and shadows any outer binding. Check these
+        # first so the shadow wins.
+        for node in ast.walk(scope):
+            if not isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                continue
+            if not _node_contains(node, use_site):
+                continue
+            for gen in node.generators:
+                if isinstance(gen.target, ast.Name) and gen.target.id == var_name:
+                    inferred = self._infer_iter_yields_model(gen.iter)
+                    if inferred is not None:
+                        return inferred
+
+        # Statement-level bindings: assignments and ``for`` loops.
+        # Last match preceding the use site wins.
+        last_match: ModelInfo | None = None
         for stmt in ast.walk(scope):
-            if not isinstance(stmt, ast.Assign):
-                continue
-            if (stmt.lineno, stmt.col_offset) >= use_pos:
-                continue
-            for tgt in stmt.targets:
-                if isinstance(tgt, ast.Name) and tgt.id == var_name:
-                    inferred = self._infer_call_result_model(stmt.value)
+            if isinstance(stmt, ast.Assign):
+                if (stmt.lineno, stmt.col_offset) >= use_pos:
+                    continue
+                for tgt in stmt.targets:
+                    if isinstance(tgt, ast.Name) and tgt.id == var_name:
+                        inferred = self._infer_call_result_model(stmt.value)
+                        if inferred is not None:
+                            last_match = inferred
+            elif isinstance(stmt, (ast.For, ast.AsyncFor)):
+                if (stmt.lineno, stmt.col_offset) >= use_pos:
+                    continue
+                if isinstance(stmt.target, ast.Name) and stmt.target.id == var_name:
+                    inferred = self._infer_iter_yields_model(stmt.iter)
                     if inferred is not None:
                         last_match = inferred
         return last_match
+
+    def _infer_iter_yields_model(self, value: ast.AST) -> ModelInfo | None:
+        """Recognise iterables that yield Django model instances.
+
+        Covers ``Model.objects`` (bare manager) and chained queryset
+        methods like ``Model.objects.filter(...).order_by(...)``.
+        """
+        # Bare ``Model.objects`` / ``Model._default_manager`` — managers
+        # are iterable and yield instances.
+        if (
+            isinstance(value, ast.Attribute)
+            and value.attr in _MANAGER_NAMES
+            and isinstance(value.value, ast.Name)
+        ):
+            return self.django_index.lookup(value.value.id)
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
+            method = value.func.attr
+            if method in _QUERY_METHODS_RETURNING_QUERYSET:
+                return self._infer_iter_yields_model(value.func.value)
+        return None
 
     def _resolve_via_annotation(
         self, receiver: ast.AST, tree: ast.Module
@@ -1033,6 +1098,14 @@ class DjangoAnalyzer:
 # ---------------------------------------------------------------------------
 # Helpers — kept module-level so they're easy to test in isolation later.
 # ---------------------------------------------------------------------------
+
+
+def _node_contains(parent: ast.AST, target: ast.AST) -> bool:
+    """Whether *target* is *parent* or a descendant of it (identity check)."""
+    for sub in ast.walk(parent):
+        if sub is target:
+            return True
+    return False
 
 
 def _is_get_user_model_call(value: ast.AST) -> bool:

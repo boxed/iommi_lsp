@@ -370,6 +370,56 @@ def test_explicit_pk_field_name_is_suppressed(tmp_path: Path):
     assert a.is_false_positive(f.as_uri(), diag) is True
 
 
+def test_dict_comprehension_target_resolves_receiver(tmp_path: Path):
+    """``{u.id: u for u in User.objects.all()}`` — comprehension target.
+
+    The comprehension binds ``u`` to a ``User`` instance, so ``u.id``
+    (an implicit-PK attribute) must be suppressed.
+    """
+    src = (
+        "from myapp.models import User\n"
+        "\n"
+        "def f():\n"
+        "    return {u.id: u for u in User.objects.all()}\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    text = src.splitlines()[line]
+    # The first "id" in the line — i.e., the `u.id` key.
+    start = text.index(".id") + 1
+    diag = _diag(line, start, start + 2, "id")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_for_loop_target_resolves_receiver(tmp_path: Path):
+    """``for u in User.objects.filter(...)`` — for-loop target binding."""
+    src = (
+        "from myapp.models import User\n"
+        "\n"
+        "def f():\n"
+        "    for u in User.objects.filter(email='x'):\n"
+        "        print(u.id)\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 4
+    text = src.splitlines()[line]
+    start = text.index(".id") + 1
+    diag = _diag(line, start, start + 2, "id")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
 def test_reverse_relation_is_dropped(tmp_path: Path):
     src = (
         "from blog.models import Author\n"
@@ -410,6 +460,161 @@ def test_default_reverse_set_is_dropped(tmp_path: Path):
     diag = _diag(line, start, start + len("comment_set"), "comment_set")
 
     assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_reverse_relation_on_annotated_param_is_dropped(tmp_path: Path):
+    """``def f(a: Author): a.articles`` — related_name via annotation."""
+    src = (
+        "from blog.models import Author\n"
+        "\n"
+        "def f(a: Author):\n"
+        "    return a.articles\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "related_names")
+    a.django_index = build_index(CORPUS / "related_names")
+
+    line = 3
+    start = src.splitlines()[line].index("articles")
+    diag = _diag(line, start, start + len("articles"), "articles")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_default_reverse_set_on_annotated_param_is_dropped(tmp_path: Path):
+    """``def f(a: Article): a.comment_set`` — default ``*_set`` via annotation."""
+    src = (
+        "from blog.models import Article\n"
+        "\n"
+        "def f(a: Article):\n"
+        "    return a.comment_set\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "related_names")
+    a.django_index = build_index(CORPUS / "related_names")
+
+    line = 3
+    start = src.splitlines()[line].index("comment_set")
+    diag = _diag(line, start, start + len("comment_set"), "comment_set")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_reverse_relation_on_self_in_model_method_is_dropped(tmp_path: Path):
+    """``def method(self): self.comment_set`` inside the target model class."""
+    src = (
+        "from django.db import models\n"
+        "\n"
+        "class Article(models.Model):\n"
+        "    title = models.CharField(max_length=200)\n"
+        "\n"
+        "    def f(self):\n"
+        "        return self.comment_set\n"
+        "\n"
+        "class Comment(models.Model):\n"
+        "    article = models.ForeignKey(Article, on_delete=models.CASCADE)\n"
+    )
+    f = tmp_path / "blog" / "models.py"
+    f.parent.mkdir()
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    line = 6
+    start = src.splitlines()[line].index("comment_set")
+    diag = _diag(line, start, start + len("comment_set"), "comment_set")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_reverse_relation_on_annotated_assignment_is_dropped(tmp_path: Path):
+    """``a: Article = ...; a.comment_set`` — annotated assignment receiver."""
+    src = (
+        "from blog.models import Article\n"
+        "\n"
+        "def f():\n"
+        "    a: Article = get_article()\n"
+        "    return a.comment_set\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "related_names")
+    a.django_index = build_index(CORPUS / "related_names")
+
+    line = 4
+    start = src.splitlines()[line].index("comment_set")
+    diag = _diag(line, start, start + len("comment_set"), "comment_set")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_m2m_reverse_relation_on_annotated_param_is_dropped(tmp_path: Path):
+    """``def f(a: Article): a.tags`` — M2M reverse with related_name."""
+    src = (
+        "from blog.models import Article\n"
+        "\n"
+        "def f(a: Article):\n"
+        "    return a.tags\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "related_names")
+    a.django_index = build_index(CORPUS / "related_names")
+
+    line = 3
+    start = src.splitlines()[line].index("tags")
+    diag = _diag(line, start, start + len("tags"), "tags")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_unknown_reverse_on_annotated_param_is_kept(tmp_path: Path):
+    """``def f(a: Article): a.bogus_set`` — not a real reverse, keep diag."""
+    src = (
+        "from blog.models import Article\n"
+        "\n"
+        "def f(a: Article):\n"
+        "    return a.bogus_set\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "related_names")
+    a.django_index = build_index(CORPUS / "related_names")
+
+    line = 3
+    start = src.splitlines()[line].index("bogus_set")
+    diag = _diag(line, start, start + len("bogus_set"), "bogus_set")
+
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_hidden_reverse_with_plus_is_kept(tmp_path: Path):
+    """``related_name='+'`` disables the reverse — ``a.hiddenlink_set`` is a real bug."""
+    src = (
+        "from blog.models import Article\n"
+        "\n"
+        "def f(a: Article):\n"
+        "    return a.hiddenlink_set\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "related_names")
+    a.django_index = build_index(CORPUS / "related_names")
+
+    line = 3
+    start = src.splitlines()[line].index("hiddenlink_set")
+    diag = _diag(line, start, start + len("hiddenlink_set"), "hiddenlink_set")
+
+    assert a.is_false_positive(f.as_uri(), diag) is False
 
 
 def test_fk_id_accessor_is_dropped(tmp_path: Path):
