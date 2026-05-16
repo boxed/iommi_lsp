@@ -32,6 +32,7 @@ from .analyzers.signals import SignalsAnalyzer
 from .analyzers.templates import TemplateAnalyzer
 from .analyzers.urls import UrlAnalyzer
 from .analyzers.views import ViewsAnalyzer
+from .parse_cache import ParseCache
 from .interceptor import (
     CompletionMatchmaker,
     DefinitionRouter,
@@ -139,8 +140,16 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
 
     root = workspace or Path.cwd()
     documents = DocumentStore()
+    # One AST per (uri, source) shared across analyzers. Without this,
+    # ty's publishDiagnostics frame triggers each analyzer's
+    # is_false_positive on every diagnostic; analyzers that re-parsed the
+    # buffer per call multiplied that into seconds of dead time on
+    # 10k-line files.
+    parse_cache = ParseCache()
+    parse_provider = parse_cache.get
     django_analyzer = DjangoAnalyzer(
         workspace_root=root, text_provider=documents.get,
+        parse_provider=parse_provider,
     )
     iommi_analyzer = IommiAnalyzer(
         workspace_root=root,
@@ -148,9 +157,11 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
         # Lets the iommi analyzer offer ``columns__<model_field>``
         # completions when the call carries ``auto__model=Model``.
         django_index_provider=lambda: django_analyzer.django_index,
+        parse_provider=parse_provider,
     )
     url_analyzer = UrlAnalyzer(
         workspace_root=root, text_provider=documents.get,
+        parse_provider=parse_provider,
     )
     template_analyzer = TemplateAnalyzer(
         workspace_root=root,
@@ -169,16 +180,19 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
         workspace_root=root,
         text_provider=documents.get,
         django_index_provider=lambda: django_analyzer.django_index,
+        parse_provider=parse_provider,
     )
     forms_analyzer = FormsAnalyzer(
         workspace_root=root,
         text_provider=documents.get,
         django_index_provider=lambda: django_analyzer.django_index,
+        parse_provider=parse_provider,
     )
     views_analyzer = ViewsAnalyzer(
         workspace_root=root,
         text_provider=documents.get,
         django_index_provider=lambda: django_analyzer.django_index,
+        parse_provider=parse_provider,
     )
     signals_analyzer = SignalsAnalyzer(
         workspace_root=root,
@@ -187,6 +201,7 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
     )
     migrations_analyzer = MigrationsAnalyzer(
         workspace_root=root, text_provider=documents.get,
+        parse_provider=parse_provider,
     )
     # Order matters for completion latency: ``_gather`` stops at the first
     # ``exclusive=True`` analyzer, so put the ones that are cheapest *and*

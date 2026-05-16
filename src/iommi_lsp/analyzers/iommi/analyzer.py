@@ -108,10 +108,12 @@ class IommiAnalyzer:
         text_provider: Callable[[str], str | None] | None = None,
         django_index_provider: "Callable[[], DjangoIndex | None] | None" = None,
         auto_build: bool = True,
+        parse_provider: "Callable[[str, str], ast.Module | None] | None" = None,
     ) -> None:
         self.workspace_root = workspace_root
         self.graph: IommiGraph = graph or IommiGraph()
         self._text_provider = text_provider
+        self._parse_provider = parse_provider
         # iommi's ``auto__model=Model``/``auto__rows=qs`` pattern lets us
         # surface a model's fields as ``columns__<field>`` completions.
         # The provider is a callable rather than a snapshot so the iommi
@@ -521,13 +523,20 @@ class IommiAnalyzer:
         if source is None:
             return None
         cached = self._cache.get(uri)
+        if cached is not None and cached.source is source:
+            return cached
         if cached is not None and cached.source == source:
             return cached
-        try:
-            tree = ast.parse(source, filename=str(path))
-        except SyntaxError as e:
-            _log.debug("could not parse %s: %s", path, e)
-            return None
+        if self._parse_provider is not None:
+            tree = self._parse_provider(uri, source)
+            if tree is None:
+                return None
+        else:
+            try:
+                tree = ast.parse(source, filename=str(path))
+            except SyntaxError as e:
+                _log.debug("could not parse %s: %s", path, e)
+                return None
         parsed = _ParsedFile(tree=tree, source=source)
         self._cache[uri] = parsed
         return parsed

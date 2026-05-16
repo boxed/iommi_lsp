@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 from collections.abc import Callable
 from collections import defaultdict
 from pathlib import Path
@@ -72,9 +73,11 @@ class MigrationsAnalyzer:
         self,
         workspace_root: Path,
         text_provider: Callable[[str], str | None] | None = None,
+        parse_provider: "Callable[[str, str], ast.Module | None] | None" = None,
     ) -> None:
         self.workspace_root = workspace_root
         self._text_provider = text_provider
+        self._parse_provider = parse_provider
         self._migrations: dict[str, list[str]] = {}
 
     @property
@@ -98,16 +101,33 @@ class MigrationsAnalyzer:
         path = _uri_to_path(uri)
         if path is None:
             return False
+        # ``RunPython.noop`` / ``RunSQL.noop`` only appears inside
+        # ``<app>/migrations/<NNNN>_*.py``. Gate on that before doing
+        # any per-file work — without this, the analyzer would parse the
+        # buffer once per diagnostic on every file the user opens.
+        if not _looks_like_migration_path(path):
+            return False
         source = self._source_for(uri, path)
         if source is None:
             return False
+        tree = self._parse(uri, source)
+        if tree is None:
+            return False
         try:
-            return _is_migration_noop_attr(source, diagnostic)
+            return _is_migration_noop_attr(tree, diagnostic)
         except Exception:
             _log.exception(
                 "migration noop suppression check crashed; keeping the diagnostic"
             )
             return False
+
+    def _parse(self, uri: str, source: str) -> ast.Module | None:
+        if self._parse_provider is not None:
+            return self._parse_provider(uri, source)
+        try:
+            return ast.parse(source)
+        except SyntaxError:
+            return None
 
     def additional_diagnostics(self, uri: str) -> list[Diagnostic]:
         return []
@@ -157,16 +177,29 @@ def _is_unresolved_attribute(diagnostic: Diagnostic) -> bool:
     return False
 
 
-def _is_migration_noop_attr(source: str, diagnostic: Diagnostic) -> bool:
+_MIGRATION_FILENAME_RE = re.compile(r"^\d{4}_.*\.py$")
+
+
+def _looks_like_migration_path(path: Path) -> bool:
+    """Heuristic gate for ``is_false_positive`` — skip non-migration files.
+
+    Real Django migrations live in ``<app>/migrations/<NNNN>_*.py``, but
+    we accept either the directory or the filename pattern so the
+    analyzer keeps working in synthetic test fixtures where the file
+    isn't necessarily nested under ``migrations/``.
+    """
+    parts = path.parts
+    if len(parts) >= 2 and parts[-2] == "migrations":
+        return True
+    return bool(_MIGRATION_FILENAME_RE.match(path.name))
+
+
+def _is_migration_noop_attr(tree: ast.Module, diagnostic: Diagnostic) -> bool:
     """``RunPython.noop`` / ``RunSQL.noop`` / ``migrations.RunPython.noop``
     — Django attaches ``noop`` as a class attribute on these operation
     classes. ty can't see it without runtime stubs; drop the warning.
     """
     rng = diagnostic.get("range") or {}
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return False
     attr = _find_attribute_at(tree, rng)
     if attr is None or attr.attr != "noop":
         return False
@@ -176,6 +209,21 @@ def _is_migration_noop_attr(source: str, diagnostic: Diagnostic) -> bool:
     if isinstance(receiver, ast.Attribute):
         return receiver.attr in _NOOP_OWNERS
     return False
+
+
+_ATTR_INDEX_ATTR = "_iommi_lsp_migrations_attr_index"
+
+
+def _attr_index(tree: ast.Module) -> list[ast.Attribute]:
+    cached = getattr(tree, _ATTR_INDEX_ATTR, None)
+    if cached is not None:
+        return cached
+    attrs = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute)]
+    try:
+        setattr(tree, _ATTR_INDEX_ATTR, attrs)
+    except (AttributeError, TypeError):
+        pass
+    return attrs
 
 
 def _find_attribute_at(tree: ast.Module, rng: dict) -> ast.Attribute | None:
@@ -188,9 +236,7 @@ def _find_attribute_at(tree: ast.Module, rng: dict) -> ast.Attribute | None:
 
     best: ast.Attribute | None = None
     best_size = (10**9, 10**9)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Attribute):
-            continue
+    for node in _attr_index(tree):
         nl = node.lineno
         nc = node.col_offset
         nel = node.end_lineno or nl

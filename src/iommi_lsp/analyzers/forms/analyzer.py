@@ -94,10 +94,12 @@ class FormsAnalyzer:
         workspace_root: Path,
         text_provider: Callable[[str], str | None] | None = None,
         django_index_provider: "Callable[[], DjangoIndex] | None" = None,
+        parse_provider: "Callable[[str, str], ast.Module | None] | None" = None,
     ) -> None:
         self.workspace_root = workspace_root
         self._text_provider = text_provider
         self._django_index_provider = django_index_provider
+        self._parse_provider = parse_provider
 
     async def index(self, workspace_root: Path) -> None:
         self.workspace_root = workspace_root
@@ -115,11 +117,22 @@ class FormsAnalyzer:
         source = self._source_for(uri, path)
         if source is None:
             return []
+        tree = self._parse(uri, source)
+        if tree is None:
+            return []
         try:
-            return list(_scan_diagnostics(source, self._index()))
+            return list(_scan_diagnostics(tree, self._index()))
         except Exception:
             _log.exception("forms diagnostic scanner crashed; emitting nothing")
             return []
+
+    def _parse(self, uri: str, source: str) -> ast.Module | None:
+        if self._parse_provider is not None:
+            return self._parse_provider(uri, source)
+        try:
+            return ast.parse(source)
+        except SyntaxError:
+            return None
 
     def completions(self, uri: str, position: dict) -> CompletionResult:
         empty = CompletionResult()
@@ -319,11 +332,7 @@ def _effective_field_names(
 # ---------------------------------------------------------------------------
 
 
-def _scan_diagnostics(source: str, index: "DjangoIndex | None"):
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return
+def _scan_diagnostics(tree: ast.Module, index: "DjangoIndex | None"):
     for cls in ast.walk(tree):
         if not isinstance(cls, ast.ClassDef):
             continue

@@ -117,6 +117,7 @@ class DjangoAnalyzer:
         django_index: DjangoIndex | None = None,
         config: "Config | None" = None,
         text_provider: Callable[[str], str | None] | None = None,
+        parse_provider: "Callable[[str, str], ast.Module | None] | None" = None,
     ) -> None:
         # Lazy import — config.py pulls in this package via magic.py and we
         # need to break the cycle.
@@ -126,6 +127,7 @@ class DjangoAnalyzer:
         self.django_index: DjangoIndex = django_index or DjangoIndex()
         self.config: "Config" = config or DEFAULT_CONFIG
         self._text_provider = text_provider
+        self._parse_provider = parse_provider
         self._cache: dict[str, _ParsedFile] = {}
         self._scrapes: dict[Path, _FileScrape] = {}
 
@@ -281,13 +283,20 @@ class DjangoAnalyzer:
         if source is None:
             return None
         cached = self._cache.get(uri)
+        if cached is not None and cached.source is source:
+            return cached
         if cached is not None and cached.source == source:
             return cached
-        try:
-            tree = ast.parse(source, filename=str(path))
-        except SyntaxError as e:
-            _log.debug("could not parse %s: %s", path, e)
-            return None
+        if self._parse_provider is not None:
+            tree = self._parse_provider(uri, source)
+            if tree is None:
+                return None
+        else:
+            try:
+                tree = ast.parse(source, filename=str(path))
+            except SyntaxError as e:
+                _log.debug("could not parse %s: %s", path, e)
+                return None
         parsed = _ParsedFile(tree=tree, source=source)
         self._cache[uri] = parsed
         return parsed
@@ -653,9 +662,7 @@ class DjangoAnalyzer:
         # LSP positions are 0-indexed; AST line numbers are 1-indexed.
         line_no = int(start.get("line", 0)) + 1
         col = int(start.get("character", 0))
-        for node in ast.walk(parsed.tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
+        for node in _function_def_index(parsed.tree):
             params = list(node.args.posonlyargs) + list(node.args.args)
             # Skip self/cls so class-based views (`def get(self, request, ...)`)
             # are still treated as having `request` first.
@@ -1596,6 +1603,46 @@ def _position_within_attr_name(
     return name_start <= character <= attr_end_col
 
 
+_ATTR_INDEX_ATTR = "_iommi_lsp_django_attr_index"
+_FUNCDEF_INDEX_ATTR = "_iommi_lsp_django_funcdef_index"
+
+
+def _function_def_index(
+    tree: ast.Module,
+) -> list[ast.AST]:
+    """All FunctionDef/AsyncFunctionDef nodes in *tree*, cached per parse."""
+    cached = getattr(tree, _FUNCDEF_INDEX_ATTR, None)
+    if cached is not None:
+        return cached
+    out = [
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    try:
+        setattr(tree, _FUNCDEF_INDEX_ATTR, out)
+    except (AttributeError, TypeError):
+        pass
+    return out
+
+
+def _attr_index(tree: ast.Module) -> list[ast.Attribute]:
+    """All ``ast.Attribute`` nodes in *tree*, computed once per parse.
+
+    Without this, ``_find_attribute_at`` walks the whole AST per
+    diagnostic. With ~50 diagnostics per file that's 50 full walks of
+    an 11k-line tree per ``publishDiagnostics`` frame.
+    """
+    cached = getattr(tree, _ATTR_INDEX_ATTR, None)
+    if cached is not None:
+        return cached
+    attrs = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute)]
+    try:
+        setattr(tree, _ATTR_INDEX_ATTR, attrs)
+    except (AttributeError, TypeError):
+        pass
+    return attrs
+
+
 def _find_attribute_at(tree: ast.Module, range_: dict) -> ast.Attribute | None:
     """Find the smallest ``ast.Attribute`` node containing the LSP range."""
     start = range_.get("start") or {}
@@ -1607,9 +1654,7 @@ def _find_attribute_at(tree: ast.Module, range_: dict) -> ast.Attribute | None:
 
     best: ast.Attribute | None = None
     best_size = (10**9, 10**9)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Attribute):
-            continue
+    for node in _attr_index(tree):
         nl = node.lineno
         nc = node.col_offset
         nel = node.end_lineno or nl

@@ -158,10 +158,12 @@ class ViewsAnalyzer:
         workspace_root: Path,
         text_provider: Callable[[str], str | None] | None = None,
         django_index_provider: "Callable[[], DjangoIndex] | None" = None,
+        parse_provider: "Callable[[str, str], ast.Module | None] | None" = None,
     ) -> None:
         self.workspace_root = workspace_root
         self._text_provider = text_provider
         self._django_index_provider = django_index_provider
+        self._parse_provider = parse_provider
 
     async def index(self, workspace_root: Path) -> None:
         self.workspace_root = workspace_root
@@ -178,8 +180,11 @@ class ViewsAnalyzer:
         source = self._source_for(uri, path)
         if source is None:
             return False
+        tree = self._parse(uri, source)
+        if tree is None:
+            return False
         try:
-            return _diagnostic_is_cbv_self_attr(source, diagnostic)
+            return _diagnostic_is_cbv_self_attr(tree, diagnostic)
         except Exception:
             _log.exception(
                 "CBV self-attr suppression check crashed; keeping the diagnostic"
@@ -196,8 +201,11 @@ class ViewsAnalyzer:
         source = self._source_for(uri, path)
         if source is None:
             return []
+        tree = self._parse(uri, source)
+        if tree is None:
+            return []
         try:
-            return list(_scan_diagnostics(source, index))
+            return list(_scan_diagnostics(tree, index))
         except Exception:
             _log.exception("views diagnostic scanner crashed; emitting nothing")
             return []
@@ -218,6 +226,14 @@ class ViewsAnalyzer:
         except Exception:
             _log.exception("views completion scanner crashed; emitting nothing")
             return empty
+
+    def _parse(self, uri: str, source: str) -> ast.Module | None:
+        if self._parse_provider is not None:
+            return self._parse_provider(uri, source)
+        try:
+            return ast.parse(source)
+        except SyntaxError:
+            return None
 
     def _index(self) -> "DjangoIndex | None":
         if self._django_index_provider is None:
@@ -253,7 +269,7 @@ def _is_unresolved_attribute(diagnostic: Diagnostic) -> bool:
     return False
 
 
-def _diagnostic_is_cbv_self_attr(source: str, diagnostic: Diagnostic) -> bool:
+def _diagnostic_is_cbv_self_attr(tree: ast.Module, diagnostic: Diagnostic) -> bool:
     """Drop the diagnostic when it pins to ``self.<inherited CBV attr>``
     inside a class that transitively inherits a generic CBV.
 
@@ -263,10 +279,6 @@ def _diagnostic_is_cbv_self_attr(source: str, diagnostic: Diagnostic) -> bool:
     a recognised CBV base.
     """
     rng = diagnostic.get("range") or {}
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return False
     attr = _find_attribute_at(tree, rng)
     if attr is None:
         return False
@@ -276,6 +288,23 @@ def _diagnostic_is_cbv_self_attr(source: str, diagnostic: Diagnostic) -> bool:
         return False
     cls = _enclosing_cbv_class(tree, attr)
     return cls is not None
+
+
+_ATTR_INDEX_ATTR = "_iommi_lsp_views_attr_index"
+_CBV_CLASS_INDEX_ATTR = "_iommi_lsp_views_cbv_classes"
+
+
+def _attr_index(tree: ast.Module) -> list[ast.Attribute]:
+    """All ``ast.Attribute`` nodes in *tree*, computed once per parse."""
+    cached = getattr(tree, _ATTR_INDEX_ATTR, None)
+    if cached is not None:
+        return cached
+    attrs = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute)]
+    try:
+        setattr(tree, _ATTR_INDEX_ATTR, attrs)
+    except (AttributeError, TypeError):
+        pass
+    return attrs
 
 
 def _find_attribute_at(tree: ast.Module, rng: dict) -> ast.Attribute | None:
@@ -288,9 +317,7 @@ def _find_attribute_at(tree: ast.Module, rng: dict) -> ast.Attribute | None:
 
     best: ast.Attribute | None = None
     best_size = (10**9, 10**9)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Attribute):
-            continue
+    for node in _attr_index(tree):
         nl = node.lineno
         nc = node.col_offset
         nel = node.end_lineno or nl
@@ -306,20 +333,38 @@ def _find_attribute_at(tree: ast.Module, rng: dict) -> ast.Attribute | None:
     return best
 
 
+def _cbv_classes(tree: ast.Module) -> list[ast.ClassDef]:
+    """Sorted-by-lineno list of CBV-rooted classes, cached per parse."""
+    cached = getattr(tree, _CBV_CLASS_INDEX_ATTR, None)
+    if cached is not None:
+        return cached
+    out: list[ast.ClassDef] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        if node.lineno is None or node.end_lineno is None:
+            continue
+        if not any(_is_cbv_base(b) for b in node.bases):
+            continue
+        out.append(node)
+    out.sort(key=lambda n: n.lineno)
+    try:
+        setattr(tree, _CBV_CLASS_INDEX_ATTR, out)
+    except (AttributeError, TypeError):
+        pass
+    return out
+
+
 def _enclosing_cbv_class(tree: ast.Module, target: ast.AST) -> ast.ClassDef | None:
     target_line = getattr(target, "lineno", None)
     if target_line is None:
         return None
     best: ast.ClassDef | None = None
     best_span = 10**9
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        if node.lineno is None or node.end_lineno is None:
-            continue
-        if not (node.lineno <= target_line <= node.end_lineno):
-            continue
-        if not any(_is_cbv_base(b) for b in node.bases):
+    for node in _cbv_classes(tree):
+        if node.lineno > target_line:
+            break
+        if node.end_lineno < target_line:
             continue
         span = node.end_lineno - node.lineno
         if span < best_span:
@@ -333,11 +378,7 @@ def _enclosing_cbv_class(tree: ast.Module, target: ast.AST) -> ast.ClassDef | No
 # ---------------------------------------------------------------------------
 
 
-def _scan_diagnostics(source: str, index: "DjangoIndex"):
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return
+def _scan_diagnostics(tree: ast.Module, index: "DjangoIndex"):
     for cls in ast.walk(tree):
         if not isinstance(cls, ast.ClassDef):
             continue

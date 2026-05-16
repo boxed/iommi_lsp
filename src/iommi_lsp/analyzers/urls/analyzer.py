@@ -95,9 +95,11 @@ class UrlAnalyzer:
         self,
         workspace_root: Path,
         text_provider: Callable[[str], str | None] | None = None,
+        parse_provider: "Callable[[str, str], ast.Module | None] | None" = None,
     ) -> None:
         self.workspace_root = workspace_root
         self._text_provider = text_provider
+        self._parse_provider = parse_provider
         self.url_index = UrlIndex()
 
     @property
@@ -149,11 +151,22 @@ class UrlAnalyzer:
         source = self._source_for(uri, path)
         if source is None:
             return []
+        tree = self._parse(uri, source)
+        if tree is None:
+            return []
         try:
-            return list(_scan_diagnostics(source, self.url_index))
+            return list(_scan_diagnostics(tree, self.url_index))
         except Exception:
             _log.exception("url diagnostic scanner crashed; emitting nothing")
             return []
+
+    def _parse(self, uri: str, source: str) -> ast.Module | None:
+        if self._parse_provider is not None:
+            return self._parse_provider(uri, source)
+        try:
+            return ast.parse(source)
+        except SyntaxError:
+            return None
 
     def completions(self, uri: str, position: dict) -> CompletionResult:
         empty = CompletionResult()
@@ -478,12 +491,8 @@ def _scan_completions(
     return CompletionResult(items=items, exclusive=True)
 
 
-def _scan_diagnostics(source: str, index: UrlIndex):
+def _scan_diagnostics(tree: ast.Module, index: UrlIndex):
     """Yield diagnostics for ``reverse('unknown')`` style calls."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
