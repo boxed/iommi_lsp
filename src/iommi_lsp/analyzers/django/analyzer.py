@@ -327,9 +327,7 @@ class DjangoAnalyzer:
         # ListComp/DictComp/SetComp/GeneratorExp binds ``p`` only inside
         # that comprehension and shadows any outer binding. Check these
         # first so the shadow wins.
-        for node in ast.walk(scope):
-            if not isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-                continue
+        for node in _comprehensions_in_scope(scope):
             if not _node_contains(node, use_site):
                 continue
             for gen in node.generators:
@@ -339,24 +337,19 @@ class DjangoAnalyzer:
                         return inferred
 
         # Statement-level bindings: assignments and ``for`` loops.
-        # Last match preceding the use site wins.
+        # Last match preceding the use site wins. Each binding carries
+        # its kind so we apply the right inference helper — ``call`` for
+        # ``x = Model.objects.get(...)``, ``iter`` for ``for x in qs``.
         last_match: ModelInfo | None = None
-        for stmt in ast.walk(scope):
-            if isinstance(stmt, ast.Assign):
-                if (stmt.lineno, stmt.col_offset) >= use_pos:
-                    continue
-                for tgt in stmt.targets:
-                    if isinstance(tgt, ast.Name) and tgt.id == var_name:
-                        inferred = self._infer_call_result_model(stmt.value, tree=tree)
-                        if inferred is not None:
-                            last_match = inferred
-            elif isinstance(stmt, (ast.For, ast.AsyncFor)):
-                if (stmt.lineno, stmt.col_offset) >= use_pos:
-                    continue
-                if isinstance(stmt.target, ast.Name) and stmt.target.id == var_name:
-                    inferred = self._infer_iter_yields_model(stmt.iter, tree=tree)
-                    if inferred is not None:
-                        last_match = inferred
+        for stmt_pos, kind, value in _name_bindings_in_scope(scope, var_name):
+            if stmt_pos >= use_pos:
+                break
+            if kind == "call":
+                inferred = self._infer_call_result_model(value, tree=tree)
+            else:
+                inferred = self._infer_iter_yields_model(value, tree=tree)
+            if inferred is not None:
+                last_match = inferred
         return last_match
 
     def _assignment_value_for(
@@ -371,14 +364,10 @@ class DjangoAnalyzer:
             getattr(use_site, "col_offset", 0),
         )
         last: ast.AST | None = None
-        for stmt in ast.walk(scope):
-            if not isinstance(stmt, ast.Assign):
-                continue
-            if (stmt.lineno, stmt.col_offset) >= use_pos:
-                continue
-            for tgt in stmt.targets:
-                if isinstance(tgt, ast.Name) and tgt.id == var_name:
-                    last = stmt.value
+        for stmt_pos, value in _name_assigns_in_scope(scope, var_name):
+            if stmt_pos >= use_pos:
+                break
+            last = value
         return last
 
     def _infer_iter_yields_model(
@@ -1229,23 +1218,17 @@ class DjangoAnalyzer:
         scope = _enclosing_function(tree, use_site)
         if scope is None:
             scope = tree
-        last_match: ModelInfo | None = None
         use_pos = (
             getattr(use_site, "lineno", 0),
             getattr(use_site, "col_offset", 0),
         )
-        for stmt in ast.walk(scope):
-            if not isinstance(stmt, ast.Assign):
-                continue
-            if (stmt.lineno, stmt.col_offset) >= use_pos:
-                continue
-            for tgt in stmt.targets:
-                if isinstance(tgt, ast.Name) and tgt.id == var_name:
-                    inferred = self._root_manager_model(
-                        stmt.value, tree, visited
-                    )
-                    if inferred is not None:
-                        last_match = inferred
+        last_match: ModelInfo | None = None
+        for stmt_pos, stmt_value in _name_assigns_in_scope(scope, var_name):
+            if stmt_pos >= use_pos:
+                break
+            inferred = self._root_manager_model(stmt_value, tree, visited)
+            if inferred is not None:
+                last_match = inferred
         return last_match
 
 
@@ -1260,6 +1243,93 @@ def _node_contains(parent: ast.AST, target: ast.AST) -> bool:
         if sub is target:
             return True
     return False
+
+
+_SCOPE_INDEX_ATTR = "_iommi_lsp_scope_index"
+
+
+class _ScopeIndex:
+    """Per-scope cache of name bindings, used by the local-flow resolvers.
+
+    Without this, every ORM call site triggers a fresh ``ast.walk`` over
+    the enclosing function — quadratic against (call sites × scope
+    nodes). On a 10k-line views.py with hundreds of helpers, that's the
+    bulk of additional-diagnostics latency.
+
+    Built once on first access and cached on the scope node via
+    :data:`_SCOPE_INDEX_ATTR`. Trees re-parse on every edit, so the
+    cache invalidates naturally.
+    """
+
+    __slots__ = ("assigns", "bindings", "comprehensions")
+
+    def __init__(self) -> None:
+        # name -> sorted list[(pos, value)] for Assign targets.
+        self.assigns: dict[str, list[tuple[tuple[int, int], ast.AST]]] = {}
+        # name -> sorted list[(pos, kind, value)] for Assign + For/AsyncFor.
+        # ``kind`` is "call" (Assign value, used by _infer_call_result_model)
+        # or "iter" (For iter, used by _infer_iter_yields_model).
+        self.bindings: dict[
+            str, list[tuple[tuple[int, int], str, ast.AST]]
+        ] = {}
+        self.comprehensions: list[ast.AST] = []
+
+
+def _build_scope_index(scope: ast.AST) -> _ScopeIndex:
+    idx = _ScopeIndex()
+    for node in ast.walk(scope):
+        if isinstance(node, ast.Assign):
+            pos = (node.lineno, node.col_offset)
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    idx.assigns.setdefault(tgt.id, []).append((pos, node.value))
+                    idx.bindings.setdefault(tgt.id, []).append(
+                        (pos, "call", node.value),
+                    )
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            pos = (node.lineno, node.col_offset)
+            tgt = node.target
+            if isinstance(tgt, ast.Name):
+                idx.bindings.setdefault(tgt.id, []).append(
+                    (pos, "iter", node.iter),
+                )
+        elif isinstance(
+            node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+        ):
+            idx.comprehensions.append(node)
+    for entries in idx.assigns.values():
+        entries.sort(key=lambda e: e[0])
+    for entries in idx.bindings.values():
+        entries.sort(key=lambda e: e[0])
+    return idx
+
+
+def _scope_index(scope: ast.AST) -> _ScopeIndex:
+    cached = getattr(scope, _SCOPE_INDEX_ATTR, None)
+    if cached is not None:
+        return cached
+    idx = _build_scope_index(scope)
+    try:
+        setattr(scope, _SCOPE_INDEX_ATTR, idx)
+    except (AttributeError, TypeError):
+        pass
+    return idx
+
+
+def _name_assigns_in_scope(
+    scope: ast.AST, var_name: str,
+) -> list[tuple[tuple[int, int], ast.AST]]:
+    return _scope_index(scope).assigns.get(var_name, [])
+
+
+def _name_bindings_in_scope(
+    scope: ast.AST, var_name: str,
+) -> list[tuple[tuple[int, int], str, ast.AST]]:
+    return _scope_index(scope).bindings.get(var_name, [])
+
+
+def _comprehensions_in_scope(scope: ast.AST) -> list[ast.AST]:
+    return _scope_index(scope).comprehensions
 
 
 def _is_get_user_model_call(value: ast.AST) -> bool:
@@ -1932,41 +2002,90 @@ def _field_detail(fi) -> str:
     return fi.field_type
 
 
-def _enclosing_function(tree: ast.Module, target: ast.AST) -> ast.AST | None:
-    target_line = getattr(target, "lineno", None)
-    if target_line is None:
-        return None
+_FUNC_SPANS_ATTR = "_iommi_lsp_func_spans"
+_CLASS_SPANS_ATTR = "_iommi_lsp_class_spans"
+
+
+def _build_node_spans(
+    tree: ast.Module, node_types: tuple[type, ...]
+) -> list[tuple[int, int, ast.AST]]:
+    """Collect ``(lineno, end_lineno, node)`` for every matching node in *tree*.
+
+    Sorted by ``lineno`` ascending so the smallest enclosing scope (the
+    one started latest before the target line) can be found by scanning
+    candidates from the end. Built once per parse — see
+    :func:`_enclosing_function` for why this matters.
+    """
+    spans: list[tuple[int, int, ast.AST]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, node_types):
+            continue
+        lineno = node.lineno
+        end_lineno = node.end_lineno
+        if lineno is None or end_lineno is None:
+            continue
+        spans.append((lineno, end_lineno, node))
+    spans.sort(key=lambda s: s[0])
+    return spans
+
+
+def _enclosing_from_spans(
+    spans: list[tuple[int, int, ast.AST]], target_line: int
+) -> ast.AST | None:
+    """Return the smallest-span entry containing *target_line*, or None.
+
+    Linear over *spans* — fine because spans is at most a few hundred
+    entries even for 10k-line files (one per function/class), whereas
+    ``ast.walk`` visits ~60k AST nodes on the same file.
+    """
     best: ast.AST | None = None
     best_span = 10**9
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    for lineno, end_lineno, node in spans:
+        if lineno > target_line:
+            # Sorted by lineno — everything after this starts even later.
+            break
+        if end_lineno < target_line:
             continue
-        if node.lineno is None or node.end_lineno is None:
-            continue
-        if not (node.lineno <= target_line <= node.end_lineno):
-            continue
-        span = node.end_lineno - node.lineno
+        span = end_lineno - lineno
         if span < best_span:
             best = node
             best_span = span
     return best
+
+
+def _enclosing_function(tree: ast.Module, target: ast.AST) -> ast.AST | None:
+    """Smallest ``def``/``async def`` containing *target*'s line, or None.
+
+    The span list is computed once per ``ast.Module`` and stashed on the
+    tree via :data:`_FUNC_SPANS_ATTR`. Without this cache, ``_scan_lookups``
+    walks the entire AST once per ORM call site on the file — quadratic
+    in (nodes × call sites) and the root cause of multi-second
+    additional-diagnostics latency on 10k-line files.
+    """
+    target_line = getattr(target, "lineno", None)
+    if target_line is None:
+        return None
+    spans = getattr(tree, _FUNC_SPANS_ATTR, None)
+    if spans is None:
+        spans = _build_node_spans(tree, (ast.FunctionDef, ast.AsyncFunctionDef))
+        try:
+            setattr(tree, _FUNC_SPANS_ATTR, spans)
+        except (AttributeError, TypeError):
+            # ast nodes accept arbitrary attrs in CPython, but be safe.
+            pass
+    return _enclosing_from_spans(spans, target_line)
 
 
 def _enclosing_class(tree: ast.Module, target: ast.AST) -> ast.ClassDef | None:
     target_line = getattr(target, "lineno", None)
     if target_line is None:
         return None
-    best: ast.ClassDef | None = None
-    best_span = 10**9
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        if node.lineno is None or node.end_lineno is None:
-            continue
-        if not (node.lineno <= target_line <= node.end_lineno):
-            continue
-        span = node.end_lineno - node.lineno
-        if span < best_span:
-            best = node
-            best_span = span
-    return best
+    spans = getattr(tree, _CLASS_SPANS_ATTR, None)
+    if spans is None:
+        spans = _build_node_spans(tree, (ast.ClassDef,))
+        try:
+            setattr(tree, _CLASS_SPANS_ATTR, spans)
+        except (AttributeError, TypeError):
+            pass
+    node = _enclosing_from_spans(spans, target_line)
+    return node if isinstance(node, ast.ClassDef) else None
