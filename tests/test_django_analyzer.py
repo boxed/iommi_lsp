@@ -831,6 +831,38 @@ def test_default_reverse_set_on_annotated_param_is_dropped(tmp_path: Path):
     assert a.is_false_positive(f.as_uri(), diag) is True
 
 
+def test_default_reverse_set_on_unannotated_param_via_message(tmp_path: Path):
+    """``def f(project): project.job_set`` — receiver has no annotation, so
+    we can only know the type from ty's diagnostic message
+    (``Object of type `Project` has no attribute `job_set```). The
+    message-based fallback resolves ``Project`` to the model and drops
+    the diagnostic the same as the annotated/flow cases above.
+    """
+    src = (
+        "def f(a):\n"
+        "    return a.comment_set\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "related_names")
+    a.django_index = build_index(CORPUS / "related_names")
+
+    line = 1
+    start = src.splitlines()[line].index("a.comment_set")
+    diag = {
+        "code": "unresolved-attribute",
+        "message": "Object of type `Article` has no attribute `comment_set`",
+        "range": {
+            "start": {"line": line, "character": start},
+            "end": {"line": line, "character": start + len("a.comment_set")},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
 def test_reverse_relation_on_self_in_model_method_is_dropped(tmp_path: Path):
     """``def method(self): self.comment_set`` inside the target model class."""
     src = (
