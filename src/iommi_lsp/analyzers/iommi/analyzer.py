@@ -126,6 +126,7 @@ class IommiAnalyzer:
         # build attempts.
         self._auto_build = auto_build
         self._cache: dict[str, _ParsedFile] = {}
+        self._open_bucket_cache: frozenset[str] | None = None
         # Background rebuild handle. ``index()`` spawns this whenever a
         # graph was loaded from disk so the user benefits from the
         # latest reflector logic (and any iommi upgrade since the graph
@@ -146,6 +147,7 @@ class IommiAnalyzer:
                 len(self.graph.classes), self.graph.iommi_version,
             )
             self._cache.clear()
+            self._open_bucket_cache = None
             # Schedule a background rebuild. The on-disk graph can be
             # stale in two ways the schema_version bump doesn't catch:
             # the user upgraded iommi without rebuilding, or the
@@ -180,6 +182,7 @@ class IommiAnalyzer:
                 "is built."
             )
         self._cache.clear()
+        self._open_bucket_cache = None
 
     async def _background_rebuild(self, graph_path: Path) -> None:
         """Rebuild the graph and atomically swap it in if successful.
@@ -204,6 +207,7 @@ class IommiAnalyzer:
         old = self.graph
         self.graph = built
         self._cache.clear()
+        self._open_bucket_cache = None
         _log.info(
             "swapped in refreshed iommi graph: %d → %d classes "
             "(iommi %s → %s)",
@@ -215,7 +219,65 @@ class IommiAnalyzer:
         self._cache.pop(uri, None)
 
     def is_false_positive(self, uri: str, diagnostic: Diagnostic) -> bool:
-        return False  # we only add, never subtract
+        if not _is_unresolved_attribute(diagnostic):
+            return False
+        try:
+            return self._is_open_namespace_dot_access(uri, diagnostic)
+        except Exception:
+            _log.exception("iommi extra-attr check crashed; keeping the diagnostic")
+            return False
+
+    def _is_open_namespace_dot_access(self, uri: str, diagnostic: Diagnostic) -> bool:
+        """Suppress ty's ``unresolved-attribute`` on ``<x>.<bucket>.<y>``.
+
+        ``<bucket>`` is either an open Struct/Namespace (``extra``,
+        ``extra_evaluated``) or a ``members``-kind refinable (``columns``,
+        ``fields``, ``filters``, ``parts``, ``actions``, …). In both cases
+        any sub-key is valid by design — ty sees the ``dict[str, Any]`` /
+        ``Dict[str, Column]`` shape and flags the access; we know iommi's
+        Struct lets dot access mirror keyed access.
+        """
+        path = _uri_to_path(uri)
+        if path is None:
+            return False
+        parsed = self._parse(uri, path)
+        if parsed is None:
+            return False
+        attr_node = _find_attribute_at(parsed.tree, diagnostic.get("range") or {})
+        if attr_node is None:
+            return False
+        open_buckets = self._open_bucket_names()
+        receiver = attr_node.value
+        while isinstance(receiver, ast.Attribute):
+            if receiver.attr in open_buckets:
+                return True
+            receiver = receiver.value
+        return False
+
+    def _open_bucket_names(self) -> frozenset[str]:
+        """Attribute names whose dot-access children are open-ended.
+
+        Always includes ``extra`` and ``extra_evaluated`` (iommi's open
+        Struct buckets). Adds every ``members``-kind refinable name from
+        the loaded graph, plus the well-known set (``columns``, ``fields``,
+        ``filters``, ``parts``) so the filter works before the graph is
+        built. ``actions`` is included unconditionally — Table and Form
+        both expose it and it's not in the auto-bindable map.
+        """
+        cached = getattr(self, "_open_bucket_cache", None)
+        if cached is not None:
+            return cached
+        names: set[str] = {
+            "extra", "extra_evaluated",
+            "columns", "fields", "filters", "parts", "actions", "endpoints",
+        }
+        for cls in self.graph.classes.values():
+            for ref_name, ref in cls.refinables.items():
+                if ref.kind == "members":
+                    names.add(ref_name)
+        frozen = frozenset(names)
+        self._open_bucket_cache = frozen
+        return frozen
 
     def additional_diagnostics(self, uri: str) -> list[Diagnostic]:
         if not self.graph.classes:
@@ -814,6 +876,57 @@ def _uri_to_path(uri: str) -> Path | None:
         return None
     parsed = urlparse(uri)
     return Path(unquote(parsed.path))
+
+
+def _is_unresolved_attribute(diagnostic: Diagnostic) -> bool:
+    code = diagnostic.get("code")
+    if isinstance(code, str) and code == "unresolved-attribute":
+        return True
+    if isinstance(code, dict) and code.get("value") == "unresolved-attribute":
+        return True
+    return False
+
+
+_ATTR_INDEX_ATTR = "_iommi_lsp_attr_index"
+
+
+def _attr_index(tree: ast.Module) -> list[ast.Attribute]:
+    cached = getattr(tree, _ATTR_INDEX_ATTR, None)
+    if cached is not None:
+        return cached
+    attrs = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute)]
+    try:
+        setattr(tree, _ATTR_INDEX_ATTR, attrs)
+    except (AttributeError, TypeError):
+        pass
+    return attrs
+
+
+def _find_attribute_at(tree: ast.Module, range_: dict) -> ast.Attribute | None:
+    """Find the smallest ``ast.Attribute`` node containing the LSP range."""
+    start = range_.get("start") or {}
+    end = range_.get("end") or {}
+    s_line = int(start.get("line", 0)) + 1
+    s_col = int(start.get("character", 0))
+    e_line = int(end.get("line", s_line - 1)) + 1
+    e_col = int(end.get("character", s_col))
+
+    best: ast.Attribute | None = None
+    best_size = (10**9, 10**9)
+    for node in _attr_index(tree):
+        nl = node.lineno
+        nc = node.col_offset
+        nel = node.end_lineno or nl
+        nec = node.end_col_offset or nc
+        if (nl, nc) > (s_line, s_col):
+            continue
+        if (nel, nec) < (e_line, e_col):
+            continue
+        size = (nel - nl, nec - nc)
+        if size < best_size:
+            best = node
+            best_size = size
+    return best
 
 
 def _collect_imports(tree: ast.Module) -> dict[str, str]:

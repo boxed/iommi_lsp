@@ -1215,3 +1215,157 @@ def test_no_background_rebuild_when_auto_build_disabled(tmp_path: Path):
     asyncio.run(a.index(tmp_path))
     assert a._rebuild_task is None
     assert a.graph.iommi_version == "0.0-stale"
+
+
+def _unresolved_attr_diag(line: int, col_start: int, col_end: int, attr: str) -> dict:
+    return {
+        "code": "unresolved-attribute",
+        "message": f"Object of type `dict[str, Any]` has no attribute `{attr}`",
+        "range": {
+            "start": {"line": line, "character": col_start},
+            "end": {"line": line, "character": col_end},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+
+
+def test_is_false_positive_suppresses_extra_dot_access(tmp_path: Path):
+    """``table.extra_evaluated.tags_choices`` — iommi's open Struct/Namespace
+    buckets allow arbitrary keys, so ty's ``unresolved-attribute`` is wrong."""
+    src = (
+        "from iommi import Table\n"
+        "def f(table: Table):\n"
+        "    return table.extra_evaluated.tags_choices\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+
+    line = 2
+    col = src.splitlines()[line].index("tags_choices")
+    diag = _unresolved_attr_diag(line, col, col + len("tags_choices"), "tags_choices")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_is_false_positive_suppresses_extra_dot_access_too(tmp_path: Path):
+    src = (
+        "from iommi import Form\n"
+        "def f(form: Form):\n"
+        "    return form.extra.color\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+
+    line = 2
+    col = src.splitlines()[line].index("color")
+    diag = _unresolved_attr_diag(line, col, col + len("color"), "color")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_is_false_positive_suppresses_members_dot_access(tmp_path: Path):
+    """``Table.columns``/``Table.actions``/``Form.fields``/``Query.filters``
+    are ``members`` refinables — dot access into them resolves to the
+    named member at runtime. ty sees the ``Dict[str, Column]`` shape and
+    flags it; suppress."""
+    src = (
+        "from iommi import Table, Form, Query\n"
+        "def f(table: Table, form: Form, query: Query):\n"
+        "    a = table.columns.name\n"
+        "    b = table.actions.delete\n"
+        "    c = form.fields.email\n"
+        "    d = query.filters.status\n"
+        "    return a, b, c, d\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+
+    cases = [
+        (2, "name"),
+        (3, "delete"),
+        (4, "email"),
+        (5, "status"),
+    ]
+    for line, attr in cases:
+        col = src.splitlines()[line].index(attr)
+        diag = _unresolved_attr_diag(line, col, col + len(attr), attr)
+        assert a.is_false_positive(f.as_uri(), diag) is True, attr
+
+
+def test_is_false_positive_picks_up_members_from_graph(tmp_path: Path):
+    """User-defined ``members`` refinables in the graph are also covered."""
+    custom = IommiClass(
+        qualname="myapp.Widget",
+        bases=[],
+        refinables={
+            "gadgets": Refinable(name="gadgets", kind="members"),
+        },
+    )
+    save_graph(
+        IommiGraph(
+            iommi_version="0.0-test",
+            classes={custom.qualname: custom},
+        ),
+        tmp_path / GRAPH_FILENAME,
+    )
+    src = (
+        "from myapp import Widget\n"
+        "def f(w: Widget):\n"
+        "    return w.gadgets.foo\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+
+    line = 2
+    col = src.splitlines()[line].index("foo")
+    diag = _unresolved_attr_diag(line, col, col + len("foo"), "foo")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_is_false_positive_keeps_unrelated_unresolved_attribute(tmp_path: Path):
+    """A plain ``table.bogus`` is not under ``.extra`` — leave it alone."""
+    src = (
+        "from iommi import Table\n"
+        "def f(table: Table):\n"
+        "    return table.bogus\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+
+    line = 2
+    col = src.splitlines()[line].index("bogus")
+    diag = _unresolved_attr_diag(line, col, col + len("bogus"), "bogus")
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_is_false_positive_ignores_non_unresolved_diagnostics(tmp_path: Path):
+    src = (
+        "from iommi import Table\n"
+        "def f(table: Table):\n"
+        "    return table.extra.color\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+
+    line = 2
+    col = src.splitlines()[line].index("color")
+    diag = {
+        "code": "invalid-argument-type",
+        "message": "something else",
+        "range": {
+            "start": {"line": line, "character": col},
+            "end": {"line": line, "character": col + len("color")},
+        },
+    }
+    assert a.is_false_positive(f.as_uri(), diag) is False
