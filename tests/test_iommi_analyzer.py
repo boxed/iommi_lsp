@@ -1347,6 +1347,70 @@ def test_is_false_positive_keeps_unrelated_unresolved_attribute(tmp_path: Path):
     assert a.is_false_positive(f.as_uri(), diag) is False
 
 
+def _bound_class_diag(line: int, col_start: int, col_end: int, type_name: str, attr: str) -> dict:
+    return {
+        "code": "unresolved-attribute",
+        "message": f"Object of type `{type_name}` has no attribute `{attr}`",
+        "range": {
+            "start": {"line": line, "character": col_start},
+            "end": {"line": line, "character": col_end},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+
+
+def test_is_false_positive_bridges_mainmenu_to_boundmainmenu(tmp_path: Path):
+    """``request.iommi_main_menu.active_item`` — ty-semantic types
+    ``iommi_main_menu`` as ``MainMenu`` via ``.names_to_types`` but the
+    runtime value is ``BoundMainMenu`` (returned by ``.bind()``).
+    ``active_item`` lives on the bound class."""
+    src = (
+        "def f(request):\n"
+        "    return request.iommi_main_menu.active_item\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+
+    line = 1
+    col = src.splitlines()[line].index("active_item")
+    diag = _bound_class_diag(line, col, col + len("active_item"), "MainMenu", "active_item")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_is_false_positive_bridges_m_to_boundm(tmp_path: Path):
+    """``M.bind()`` returns ``BoundM`` — bridge attrs like ``is_active``
+    and ``render_item`` that only exist on the bound side."""
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+
+    for attr in ("is_active", "render_item", "url"):
+        diag = _bound_class_diag(0, 0, 0, "M", attr)
+        assert a.is_false_positive("file:///nonexistent.py", diag) is True, attr
+
+
+def test_is_false_positive_bridge_keeps_unknown_attr(tmp_path: Path):
+    """An attr that doesn't exist on the bound class either is still
+    a real error — don't suppress it."""
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+
+    diag = _bound_class_diag(0, 0, 0, "MainMenu", "totally_made_up")
+    assert a.is_false_positive("file:///nonexistent.py", diag) is False
+
+
+def test_is_false_positive_bridge_keeps_unrelated_types(tmp_path: Path):
+    """A diagnostic against a type that isn't in the unbound→bound
+    map shouldn't be touched by this bridge."""
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+
+    diag = _bound_class_diag(0, 0, 0, "SomeRandomClass", "active_item")
+    assert a.is_false_positive("file:///nonexistent.py", diag) is False
+
+
 def test_is_false_positive_ignores_non_unresolved_diagnostics(tmp_path: Path):
     src = (
         "from iommi import Table\n"

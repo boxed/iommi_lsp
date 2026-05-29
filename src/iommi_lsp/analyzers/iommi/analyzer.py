@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +67,56 @@ class _Unset:
 
 
 _UNSET = _Unset()
+
+
+# ``MainMenu`` and ``M`` are declarative iommi classes whose ``.bind()``
+# methods return a *different* class (``BoundMainMenu`` / ``BoundM``)
+# that carries the runtime attributes users actually reach for —
+# ``active_item``, ``items``, ``url``, etc. Users who type these via
+# ``.names_to_types`` (or anywhere else) typically use the *unbound*
+# name because that's iommi's public surface, then access the bound
+# class's attrs. ty flags those accesses as unresolved because the
+# annotation says ``MainMenu`` but the attr lives on ``BoundMainMenu``.
+#
+# This bridge lists the public attribute surface of each bound
+# counterpart so we can suppress those false positives. Hardcoded
+# rather than reflected because the surface is small, stable, and
+# iommi's bound classes don't carry a ``Refinable`` graph we could
+# walk. Update if iommi's bound classes grow new public attrs.
+_BOUND_ATTR_BRIDGE: dict[str, frozenset[str]] = {
+    "MainMenu": frozenset({
+        # __init__ assignments
+        "main_menu", "request", "attrs", "template", "paths", "assets",
+        "raw_items", "items", "url", "active_item",
+        # @property / @cached_property
+        "extra", "extra_evaluated",
+        # public methods
+        "check_access", "params_are_satisfied", "render_items",
+        "own_evaluate_parameters",
+    }),
+    "M": frozenset({
+        # __init__ assignments
+        "tag", "m", "request", "parent", "root", "include", "attrs",
+        "template", "raw_items", "items", "has_rendered_items",
+        "display_name", "render_item",
+        # @cached_property
+        "rendered_attrs", "open", "icon", "link", "url",
+        "extra", "extra_evaluated",
+        # public methods
+        "render", "iommi_open_tag", "iommi_open_details_tag",
+        "iommi_close_details_tag", "is_active",
+        "own_evaluate_parameters", "params_are_satisfied", "check_access",
+    }),
+}
+
+
+# ty's two spellings of the inferred receiver type in
+# ``unresolved-attribute`` messages. The django analyzer carries the
+# same regex; duplicated here to keep the iommi analyzer
+# self-contained (no cross-analyzer imports for diagnostic parsing).
+#   * ``Object of type `MainMenu` has no attribute `active_item``` (ty-semantic)
+#   * ``Type "MainMenu" has no attribute "active_item"`` (older)
+_TY_RECEIVER_TYPE_RE = re.compile(r'(?:Object of type `([^`]+)`|Type "([^"]+)")')
 
 
 # Built-in iommi styles. Users can register more via
@@ -222,10 +273,38 @@ class IommiAnalyzer:
         if not _is_unresolved_attribute(diagnostic):
             return False
         try:
-            return self._is_open_namespace_dot_access(uri, diagnostic)
+            if self._is_open_namespace_dot_access(uri, diagnostic):
+                return True
+            return self._is_bound_class_attr(diagnostic)
         except Exception:
             _log.exception("iommi extra-attr check crashed; keeping the diagnostic")
             return False
+
+    def _is_bound_class_attr(self, diagnostic: Diagnostic) -> bool:
+        """Suppress ``unresolved-attribute`` when ty's receiver type is
+        an iommi unbound class (``MainMenu`` / ``M``) but the attr exists
+        on its bound counterpart (``BoundMainMenu`` / ``BoundM``).
+
+        Users routinely type a variable as the unbound class (it's
+        iommi's public name) and then access attributes set by
+        ``.bind()`` on the bound class. At runtime the value is the
+        bound version, so the access is fine; ty just can't see that.
+        """
+        message = diagnostic.get("message")
+        if not isinstance(message, str):
+            return False
+        type_match = _TY_RECEIVER_TYPE_RE.search(message)
+        if type_match is None:
+            return False
+        raw_type = type_match.group(1) or type_match.group(2)
+        simple_type = raw_type.rsplit(".", 1)[-1]
+        bridged = _BOUND_ATTR_BRIDGE.get(simple_type)
+        if bridged is None:
+            return False
+        attr_match = re.search(r"no attribute [`\"]([^`\"]+)[`\"]", message)
+        if attr_match is None:
+            return False
+        return attr_match.group(1) in bridged
 
     def _is_open_namespace_dot_access(self, uri: str, diagnostic: Diagnostic) -> bool:
         """Suppress ty's ``unresolved-attribute`` on ``<x>.<bucket>.<y>``.
