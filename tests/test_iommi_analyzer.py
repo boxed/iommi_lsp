@@ -1433,3 +1433,126 @@ def test_is_false_positive_ignores_non_unresolved_diagnostics(tmp_path: Path):
         },
     }
     assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+# ---------------------------------------------------------------------------
+# invalid-assignment on iommi refinable declarations: attr: T = Refinable()
+# ---------------------------------------------------------------------------
+
+
+def _refinable_assign_diag(
+    line: int, col_start: int, col_end: int, factory: str, target: str = "str",
+) -> dict:
+    """Mirror ty's ``invalid-assignment`` for ``attr: T = Refinable()``.
+
+    ty's LSP range points at the RHS factory call (the value), matching
+    the Django relation-field shape we already suppress.
+    """
+    return {
+        "code": "invalid-assignment",
+        "message": f"Object of type `{factory}` is not assignable to `{target}`",
+        "range": {
+            "start": {"line": line, "character": col_start},
+            "end": {"line": line, "character": col_end},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        "Refinable",
+        "EvaluatedRefinable",
+        "SpecialEvaluatedRefinable",
+        "RefinableMembers",
+    ],
+)
+def test_refinable_assignment_is_dropped(tmp_path: Path, factory: str):
+    src = (
+        f"from iommi.refinable import {factory}\n"
+        "\n"
+        "class Thing:\n"
+        f"    attr: str = {factory}()\n"
+    )
+    f = tmp_path / "t.py"
+    f.write_text(src)
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+
+    line = 3
+    line_text = src.splitlines()[line]
+    col_start = line_text.index(f"{factory}(")
+    col_end = len(line_text)
+    diag = _refinable_assign_diag(line, col_start, col_end, factory)
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_refinable_assignment_module_qualified_is_dropped(tmp_path: Path):
+    """``header: Namespace = iommi.refinable.EvaluatedRefinable()`` — attr call."""
+    src = (
+        "import iommi\n"
+        "\n"
+        "class Thing:\n"
+        "    header: dict = iommi.refinable.EvaluatedRefinable()\n"
+    )
+    f = tmp_path / "t.py"
+    f.write_text(src)
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+
+    line = 3
+    line_text = src.splitlines()[line]
+    col_start = line_text.index("iommi.refinable.EvaluatedRefinable(")
+    col_end = len(line_text)
+    diag = _refinable_assign_diag(line, col_start, col_end, "EvaluatedRefinable", "dict")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_refinable_members_assignment_to_dict_is_dropped(tmp_path: Path):
+    """The exact reported case: ``columns: dict[str, Column] = RefinableMembers()``.
+
+    ty emits ``Object of type `RefinableMembers` is not assignable to
+    `dict[str, Column]```; iommi's metaclass makes this valid at runtime.
+    """
+    src = (
+        "from iommi.refinable import RefinableMembers\n"
+        "\n"
+        "class MyTable:\n"
+        "    columns: dict = RefinableMembers()\n"
+    )
+    f = tmp_path / "t.py"
+    f.write_text(src)
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+
+    line = 3
+    line_text = src.splitlines()[line]
+    col_start = line_text.index("RefinableMembers(")
+    col_end = len(line_text)
+    diag = _refinable_assign_diag(
+        line, col_start, col_end, "RefinableMembers", "dict[str, Column]",
+    )
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_invalid_assignment_on_non_refinable_is_kept(tmp_path: Path):
+    """A genuine annotation mismatch (RHS is not a refinable factory) stays."""
+    src = (
+        "class Plain:\n"
+        "    x: int = str(5)\n"
+    )
+    f = tmp_path / "t.py"
+    f.write_text(src)
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
+    asyncio.run(a.index(tmp_path))
+
+    line = 1
+    line_text = src.splitlines()[line]
+    col_start = line_text.index("str(")
+    col_end = len(line_text)
+    diag = _refinable_assign_diag(line, col_start, col_end, "str", "int")
+    # Message anchors on "str", not a refinable factory name → not even
+    # a candidate, and the AST call isn't a refinable factory anyway.
+    assert a.is_false_positive(f.as_uri(), diag) is False

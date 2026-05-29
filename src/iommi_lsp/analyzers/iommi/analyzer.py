@@ -62,6 +62,27 @@ _CALLABLE_LEAVES: frozenset[str] = frozenset({
 })
 
 
+# iommi declares refinable attributes with an annotation whose factory
+# value is a descriptor, not the annotated type:
+#
+#     attr: str = Refinable()
+#     header: Namespace = EvaluatedRefinable()
+#     columns: dict[str, Column] = RefinableMembers()
+#
+# iommi's declarative metaclass rewrites these at class-creation time so
+# the runtime attribute really is the annotated type. ty doesn't model
+# that, so it emits ``invalid-assignment`` (``Object of type `Refinable`
+# is not assignable to `str``` / ``Object of type `RefinableMembers` is
+# not assignable to `dict[str, Column]```). We suppress that false
+# positive when the RHS is one of iommi's refinable factories.
+_REFINABLE_FACTORIES: frozenset[str] = frozenset({
+    "Refinable",
+    "EvaluatedRefinable",
+    "SpecialEvaluatedRefinable",
+    "RefinableMembers",
+})
+
+
 class _Unset:
     pass
 
@@ -270,6 +291,14 @@ class IommiAnalyzer:
         self._cache.pop(uri, None)
 
     def is_false_positive(self, uri: str, diagnostic: Diagnostic) -> bool:
+        if _is_refinable_assignment_message(diagnostic):
+            try:
+                return self._is_refinable_assignment(uri, diagnostic)
+            except Exception:
+                _log.exception(
+                    "iommi refinable-assignment check crashed; keeping the diagnostic"
+                )
+                return False
         if not _is_unresolved_attribute(diagnostic):
             return False
         try:
@@ -279,6 +308,25 @@ class IommiAnalyzer:
         except Exception:
             _log.exception("iommi extra-attr check crashed; keeping the diagnostic")
             return False
+
+    def _is_refinable_assignment(self, uri: str, diagnostic: Diagnostic) -> bool:
+        """Suppress ty's ``invalid-assignment`` for iommi refinable
+        declarations like ``attr: str = Refinable()``.
+
+        The diagnostic range points at the RHS call; we verify that call
+        is one of iommi's refinable factories before swallowing it so
+        genuine annotation mismatches elsewhere keep their warning.
+        """
+        path = _uri_to_path(uri)
+        if path is None:
+            return False
+        parsed = self._parse(uri, path)
+        if parsed is None:
+            return False
+        call = _find_call_at(parsed.tree, diagnostic.get("range") or {})
+        if call is None:
+            return False
+        return _call_is_refinable_factory(call)
 
     def _is_bound_class_attr(self, diagnostic: Diagnostic) -> bool:
         """Suppress ``unresolved-attribute`` when ty's receiver type is
@@ -963,6 +1011,51 @@ def _is_unresolved_attribute(diagnostic: Diagnostic) -> bool:
         return True
     if isinstance(code, dict) and code.get("value") == "unresolved-attribute":
         return True
+    return False
+
+
+def _is_refinable_assignment_message(diagnostic: Diagnostic) -> bool:
+    """Match ty's ``invalid-assignment`` whose RHS is an iommi refinable
+    factory (``Refinable`` / ``EvaluatedRefinable`` /
+    ``SpecialEvaluatedRefinable``).
+
+    Cheap message anchor; the AST shape is confirmed in
+    :meth:`IommiAnalyzer._is_refinable_assignment`.
+    """
+    code = diagnostic.get("code")
+    code_value = code if isinstance(code, str) else (
+        code.get("value") if isinstance(code, dict) else None
+    )
+    if code_value != "invalid-assignment":
+        return False
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return False
+    if "Object of type `" not in message:
+        return False
+    return any(f"`{name}" in message for name in _REFINABLE_FACTORIES)
+
+
+def _find_call_at(tree: ast.Module, range_: dict) -> ast.Call | None:
+    """Find an ``ast.Call`` node starting at the LSP range's start position."""
+    start = range_.get("start") or {}
+    s_line = int(start.get("line", 0)) + 1
+    s_col = int(start.get("character", 0))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if node.lineno == s_line and node.col_offset == s_col:
+            return node
+    return None
+
+
+def _call_is_refinable_factory(call: ast.Call) -> bool:
+    """Whether *call* is ``Refinable(...)`` / ``iommi.Refinable(...)`` etc."""
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id in _REFINABLE_FACTORIES
+    if isinstance(func, ast.Attribute):
+        return func.attr in _REFINABLE_FACTORIES
     return False
 
 
