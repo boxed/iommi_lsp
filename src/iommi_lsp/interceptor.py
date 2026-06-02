@@ -38,6 +38,7 @@ DID_SAVE = "textDocument/didSave"
 DID_CLOSE = "textDocument/didClose"
 COMPLETION = "textDocument/completion"
 DEFINITION = "textDocument/definition"
+CODE_ACTION = "textDocument/codeAction"
 CANCEL_REQUEST = "$/cancelRequest"
 
 
@@ -724,6 +725,116 @@ class DefinitionRouter:
             return body
         self._pending_initialize.discard(msg_id)
         return _ensure_definition_capability(payload, body)
+
+
+class CodeActionRouter:
+    """Two-sided hook that answers ``textDocument/codeAction`` requests
+    from analyzers (currently: the ``{% load %}`` quick fix for unloaded
+    template tags).
+
+    Editor → ty: for each ``textDocument/codeAction`` request, ask each
+    analyzer that exposes ``code_actions``. If any returns actions, write
+    the synthesized response straight back to the editor and drop the
+    forward. If no analyzer contributes, forward the request to ty
+    unchanged — ty's own code actions (for Python files) flow as before.
+
+    ty → editor: patch the ``initialize`` response so the editor knows
+    we offer code actions even when ty's own ``codeActionProvider`` is
+    absent. Has no effect when ty already advertises it.
+    """
+
+    def __init__(self, analyzers: Sequence[Analyzer] = ()) -> None:
+        self.analyzers = list(analyzers)
+        self._editor_writer: asyncio.StreamWriter | None = None
+        self._pending_initialize: set[Any] = set()
+
+    def attach_editor_writer(self, writer: asyncio.StreamWriter) -> None:
+        self._editor_writer = writer
+
+    async def on_request(self, body: bytes) -> bytes | None:
+        if not body or body[:1] != b"{":
+            return body
+        try:
+            payload: Any = json.loads(body)
+        except json.JSONDecodeError:
+            return body
+        if not isinstance(payload, dict):
+            return body
+        method = payload.get("method")
+        msg_id = payload.get("id")
+        if method == INITIALIZE and msg_id is not None:
+            self._pending_initialize.add(msg_id)
+            return body
+        if method != CODE_ACTION or msg_id is None:
+            return body
+        if self._editor_writer is None:
+            return body
+        params = payload.get("params") or {}
+        doc = params.get("textDocument") or {}
+        uri = doc.get("uri")
+        rng = params.get("range")
+        context = params.get("context") or {}
+        if not (isinstance(uri, str) and isinstance(rng, dict)):
+            return body
+
+        actions: list[dict] = []
+        for a in self.analyzers:
+            provider = getattr(a, "code_actions", None)
+            if provider is None:
+                continue
+            try:
+                actions.extend(provider(uri, rng, context))
+            except Exception:
+                _log.exception(
+                    "analyzer %s code_actions crashed",
+                    getattr(a, "name", a),
+                )
+
+        if not actions:
+            return body
+
+        synth = json.dumps(
+            {"jsonrpc": "2.0", "id": msg_id, "result": actions},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        try:
+            await jsonrpc.write_message(self._editor_writer, synth)
+        except Exception:
+            _log.exception("synthetic codeAction write failed; falling back")
+            return body
+        return None   # don't forward to ty
+
+    async def on_response(self, body: bytes) -> bytes | None:
+        if not body or body[:1] != b"{":
+            return body
+        try:
+            payload: Any = json.loads(body)
+        except json.JSONDecodeError:
+            return body
+        if not isinstance(payload, dict):
+            return body
+        msg_id = payload.get("id")
+        if msg_id is None or msg_id not in self._pending_initialize:
+            return body
+        self._pending_initialize.discard(msg_id)
+        return _ensure_code_action_capability(payload, body)
+
+
+def _ensure_code_action_capability(payload: dict, original_body: bytes) -> bytes:
+    """Patch an ``initialize`` response so the editor knows we offer
+    code actions. If ty already advertises ``codeActionProvider`` we
+    leave the payload alone."""
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return original_body
+    caps = result.get("capabilities")
+    if not isinstance(caps, dict):
+        caps = {}
+        result["capabilities"] = caps
+    if "codeActionProvider" in caps:
+        return original_body
+    caps["codeActionProvider"] = {"codeActionKinds": ["quickfix"]}
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
 def _ensure_definition_capability(payload: dict, original_body: bytes) -> bytes:

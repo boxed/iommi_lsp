@@ -61,6 +61,11 @@ _TEMPLATE_EXTENSIONS = frozenset({
 # Diagnostic emitted for ``{% url 'unknown' %}``. Mirrors the Python-side
 # code from the URL analyzer so editors can suppress them uniformly.
 URL_DIAG_CODE = "django-unknown-url-name"
+# Diagnostic emitted for ``{% mytag %}`` where ``mytag`` is registered in
+# a known templatetags library that the template hasn't ``{% load %}``ed.
+UNLOADED_TAG_DIAG_CODE = "django-unloaded-template-tag"
+# Same, for ``{{ x|myfilter }}`` uses.
+UNLOADED_FILTER_DIAG_CODE = "django-unloaded-template-filter"
 DIAG_SOURCE = "iommi_lsp"
 
 
@@ -81,6 +86,59 @@ BUILTIN_FILTERS: frozenset[str] = frozenset({
     "unordered_list", "upper", "urlencode", "urlize", "urlizetrunc",
     "wordcount", "wordwrap", "yesno",
 })
+
+
+# Tags in ``django.template.defaulttags`` + the loader tags — auto-loaded
+# into every template, no ``{% load %}`` required. Includes the
+# intermediate tokens (``elif``, ``empty``, …) that Django's parser
+# accepts inside their enclosing block tags. Closing tags (``endif``,
+# ``endblock``, …) aren't listed — anything starting with ``end`` is
+# skipped wholesale by the unloaded-tag scanner since a custom block
+# tag's closer (``endmytag``) is implied by its opener.
+BUILTIN_TAGS: frozenset[str] = frozenset({
+    "autoescape", "block", "comment", "csrf_token", "cycle", "debug",
+    "extends", "filter", "firstof", "for", "if", "ifchanged", "include",
+    "load", "lorem", "now", "querystring", "regroup", "resetcycle",
+    "spaceless", "templatetag", "url", "verbatim", "widthratio", "with",
+    # Intermediate tokens of the block tags above (and of i18n's
+    # blocktrans, whose ``plural`` arm appears without its library name).
+    "elif", "else", "empty", "plural",
+})
+
+
+# Tag libraries that ship with Django itself. They aren't discoverable by
+# walking the workspace (they live in site-packages) but the fix for an
+# unloaded use is the same ``{% load %}`` — and ``{% static %}`` without
+# ``{% load static %}`` is *the* most common instance of this mistake.
+DJANGO_LIBRARY_TAGS: dict[str, frozenset[str]] = {
+    "static": frozenset({"static", "get_static_prefix", "get_media_prefix"}),
+    "i18n": frozenset({
+        "trans", "translate", "blocktrans", "blocktranslate", "language",
+        "get_available_languages", "get_language_info",
+        "get_language_info_list", "get_current_language",
+        "get_current_language_bidi",
+    }),
+    "l10n": frozenset({"localize"}),
+    "tz": frozenset({"localtime", "timezone", "get_current_timezone"}),
+    "cache": frozenset({"cache"}),
+}
+
+
+# Filter libraries that ship with Django itself — same rationale as
+# :data:`DJANGO_LIBRARY_TAGS`. ``{{ n|intcomma }}`` without
+# ``{% load humanize %}`` is the classic instance.
+DJANGO_LIBRARY_FILTERS: dict[str, frozenset[str]] = {
+    "humanize": frozenset({
+        "apnumber", "intcomma", "intword", "naturalday", "naturaltime",
+        "ordinal",
+    }),
+    "i18n": frozenset({
+        "language_name", "language_name_local", "language_name_translated",
+        "language_bidi",
+    }),
+    "l10n": frozenset({"localize", "unlocalize"}),
+    "tz": frozenset({"localtime", "utc", "timezone"}),
+}
 
 
 class TemplateAnalyzer:
@@ -108,6 +166,11 @@ class TemplateAnalyzer:
         # are not in this dict — they live in :data:`BUILTIN_FILTERS` and are
         # always offered regardless of ``{% load %}`` state.
         self._templatetag_filters: dict[str, set[str]] = {}
+        # Library name → set of tag names registered in that library
+        # (``@register.tag`` / ``simple_tag`` / ``inclusion_tag`` /
+        # ``simple_block_tag``). Drives the unloaded-tag diagnostic and
+        # its ``{% load %}`` quick fix.
+        self._templatetag_tags: dict[str, set[str]] = {}
 
     @property
     def templates(self) -> list[str]:
@@ -125,6 +188,10 @@ class TemplateAnalyzer:
     def templatetag_filters(self) -> dict[str, set[str]]:
         return {k: set(v) for k, v in self._templatetag_filters.items()}
 
+    @property
+    def templatetag_tags(self) -> dict[str, set[str]]:
+        return {k: set(v) for k, v in self._templatetag_tags.items()}
+
     # -- Analyzer protocol ----------------------------------------------------
 
     async def index(self, workspace_root: Path) -> None:
@@ -132,19 +199,23 @@ class TemplateAnalyzer:
         self._template_paths = discover_templates_with_paths(workspace_root)
         self._templates = sorted(self._template_paths)
         self._statics = sorted(discover_statics(workspace_root))
-        self._templatetag_filters = discover_templatetag_filters(workspace_root)
+        self._templatetag_filters, self._templatetag_tags = (
+            discover_templatetag_registrations(workspace_root)
+        )
         # Templatetags library names are all packages we discovered, even
         # the ones that registered nothing — the user might be mid-edit.
         self._templatetags = sorted(
             set(discover_templatetags(workspace_root))
             | set(self._templatetag_filters)
+            | set(self._templatetag_tags)
         )
         filter_total = sum(len(v) for v in self._templatetag_filters.values())
+        tag_total = sum(len(v) for v in self._templatetag_tags.values())
         _log.info(
             "indexed %d templates, %d static files, %d templatetags "
-            "(%d custom filters) under %s",
+            "(%d custom filters, %d custom tags) under %s",
             len(self._templates), len(self._statics),
-            len(self._templatetags), filter_total, workspace_root,
+            len(self._templatetags), filter_total, tag_total, workspace_root,
         )
 
     async def on_file_changed(self, uri: str) -> None:
@@ -159,17 +230,160 @@ class TemplateAnalyzer:
         path = _uri_to_path(uri)
         if path is None or not _is_template_file(path):
             return []
+        source = self._source_for(uri, path)
+        if source is None:
+            return []
+        out: list[Diagnostic] = []
         url_index = self._url_index()
-        if url_index is None or not url_index.entries:
+        if url_index is not None and url_index.entries:
+            try:
+                out.extend(_template_url_diagnostics(source, url_index))
+            except Exception:
+                _log.exception("template URL diagnostic scanner crashed; emitting nothing")
+        try:
+            out.extend(self._unloaded_diagnostics(source))
+        except Exception:
+            _log.exception("unloaded-tag/filter diagnostic scanner crashed; emitting nothing")
+        return out
+
+    def _unloaded_tag_diagnostics(self, source: str) -> list[Diagnostic]:
+        """Diagnostics for tags whose library exists but isn't loaded.
+
+        Deliberately conservative: a tag is only flagged when we *know*
+        a library that provides it — a workspace ``templatetags/``
+        module or one of Django's own (:data:`DJANGO_LIBRARY_TAGS`).
+        Tags we can't attribute to any library stay silent; they may
+        come from a third-party package in site-packages (which we
+        never index), or from a library injected via the ``builtins``
+        option of the ``TEMPLATES`` setting.
+        """
+        providers_by_tag: dict[str, list[str]] = {}
+        for lib, tag_names in self._templatetag_tags.items():
+            for t in tag_names:
+                providers_by_tag.setdefault(t, []).append(lib)
+        for lib, tag_names in DJANGO_LIBRARY_TAGS.items():
+            for t in tag_names:
+                providers_by_tag.setdefault(t, []).append(lib)
+        if not providers_by_tag:
+            return []
+
+        loaded = _loaded_libraries(source)
+        excluded = _excluded_spans(source)
+        out: list[Diagnostic] = []
+        for m in _ANY_TAG_RE.finditer(source):
+            name = m.group(1)
+            if name in BUILTIN_TAGS or name.startswith("end"):
+                continue
+            if any(start <= m.start() < end for start, end in excluded):
+                continue
+            providers = providers_by_tag.get(name)
+            if providers is None:
+                continue
+            if any(lib in loaded for lib in providers):
+                continue
+            libraries = sorted(set(providers))
+            loads = " or ".join(f"{{% load {lib} %}}" for lib in libraries)
+            out.append({
+                "code": UNLOADED_TAG_DIAG_CODE,
+                "message": f"{name!r} requires {loads}",
+                "range": _diag_range(source, m.start(1), m.end(1)),
+                "severity": 2,
+                "source": DIAG_SOURCE,
+                "data": {"tag": name, "libraries": libraries},
+            })
+        return out
+
+    def _unloaded_filter_diagnostics(self, source: str) -> list[Diagnostic]:
+        """Diagnostics for filters whose library exists but isn't loaded.
+
+        Same conservative contract as :meth:`_unloaded_tag_diagnostics`:
+        only filters we can attribute to a workspace ``templatetags/``
+        module or a Django-bundled library
+        (:data:`DJANGO_LIBRARY_FILTERS`) are flagged.
+        """
+        providers_by_filter: dict[str, list[str]] = {}
+        for lib, names in self._templatetag_filters.items():
+            for f in names:
+                providers_by_filter.setdefault(f, []).append(lib)
+        for lib, names in DJANGO_LIBRARY_FILTERS.items():
+            for f in names:
+                providers_by_filter.setdefault(f, []).append(lib)
+        if not providers_by_filter:
+            return []
+
+        loaded = _loaded_libraries(source)
+        excluded = _excluded_spans(source)
+        out: list[Diagnostic] = []
+        for name, start_offset in _filter_uses(source):
+            if name in BUILTIN_FILTERS:
+                continue
+            if any(start <= start_offset < end for start, end in excluded):
+                continue
+            providers = providers_by_filter.get(name)
+            if providers is None:
+                continue
+            if any(lib in loaded for lib in providers):
+                continue
+            libraries = sorted(set(providers))
+            loads = " or ".join(f"{{% load {lib} %}}" for lib in libraries)
+            out.append({
+                "code": UNLOADED_FILTER_DIAG_CODE,
+                "message": f"filter {name!r} requires {loads}",
+                "range": _diag_range(source, start_offset, start_offset + len(name)),
+                "severity": 2,
+                "source": DIAG_SOURCE,
+                "data": {"filter": name, "libraries": libraries},
+            })
+        return out
+
+    def _unloaded_diagnostics(self, source: str) -> list[Diagnostic]:
+        return (
+            self._unloaded_tag_diagnostics(source)
+            + self._unloaded_filter_diagnostics(source)
+        )
+
+    def code_actions(self, uri: str, range_: dict, context: dict) -> list[dict]:
+        """Quick fixes for unloaded-tag/-filter diagnostics overlapping *range_*.
+
+        One action per candidate library: append the library to the
+        template's existing ``{% load %}`` tag when there is one, else
+        insert a fresh ``{% load lib %}`` line (after ``{% extends %}``
+        when present — extends must stay the first tag).
+        """
+        path = _uri_to_path(uri)
+        if path is None or not _is_template_file(path):
             return []
         source = self._source_for(uri, path)
         if source is None:
             return []
         try:
-            return list(_template_url_diagnostics(source, url_index))
+            diagnostics = self._unloaded_diagnostics(source)
         except Exception:
-            _log.exception("template URL diagnostic scanner crashed; emitting nothing")
+            _log.exception("unloaded-tag code-action scanner crashed; offering nothing")
             return []
+        actions: list[dict] = []
+        seen_libs: set[str] = set()
+        for diag in diagnostics:
+            if not _ranges_overlap(diag["range"], range_):
+                continue
+            for lib in diag["data"]["libraries"]:
+                if lib in seen_libs:
+                    # Two unloaded uses of the same library inside the
+                    # requested range — one fix loads them both.
+                    continue
+                seen_libs.add(lib)
+                edit, appended = _load_fix_edit(source, lib)
+                title = (
+                    f"Add '{lib}' to {{% load %}}" if appended
+                    else f"Insert {{% load {lib} %}}"
+                )
+                actions.append({
+                    "title": title,
+                    "kind": "quickfix",
+                    "diagnostics": [diag],
+                    "edit": {"changes": {uri: [edit]}},
+                })
+        return actions
 
     def completions(self, uri: str, position: dict) -> CompletionResult:
         empty = CompletionResult()
@@ -587,20 +801,36 @@ def discover_statics(workspace_root: Path) -> set[str]:
 def discover_templatetag_filters(workspace_root: Path) -> dict[str, set[str]]:
     """Walk every ``templatetags/`` package and return ``{library: {filter}}``.
 
-    For each ``templatetags/<lib>.py`` we AST-parse the module and pick
-    out filter registrations:
+    Thin wrapper around :func:`discover_templatetag_registrations` kept
+    for callers that only care about filters.
+    """
+    filters, _tags = discover_templatetag_registrations(workspace_root)
+    return filters
 
-    * ``@register.filter`` (bare) — uses the function name.
-    * ``@register.filter()`` / ``@register.filter('name')`` /
-      ``@register.filter(name='x')`` — uses the explicit name when given,
-      else the function name.
-    * ``register.filter('name', fn)`` — direct call form.
 
-    Libraries that registered no filters are omitted (the
+def discover_templatetag_registrations(
+    workspace_root: Path,
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Walk every ``templatetags/`` package; return ``(filters, tags)`` maps.
+
+    Both are ``{library: {name}}``. For each ``templatetags/<lib>.py`` we
+    AST-parse the module and pick out registrations:
+
+    * ``@register.filter`` / ``@register.tag`` / ``@register.simple_tag``
+      / ``@register.inclusion_tag(...)`` / ``@register.simple_block_tag``
+      (bare or called) — uses the explicit ``name=`` (or, for ``filter``
+      and ``tag``, the positional string) when given, else the function
+      name. ``inclusion_tag``'s positional argument is the template
+      filename, never the name.
+    * ``register.filter('name', fn)`` / ``register.tag('name', fn)`` —
+      direct call form.
+
+    Libraries that registered nothing are omitted (the
     ``discover_templatetags`` set still includes them so the
     ``{% load %}`` popup stays useful).
     """
-    out: dict[str, set[str]] = {}
+    filters: dict[str, set[str]] = {}
+    tags: dict[str, set[str]] = {}
     root = workspace_root.resolve()
     pkg_dirs: list[Path] = []
     for dirpath, dirnames, _filenames in os.walk(root):
@@ -621,45 +851,63 @@ def discover_templatetag_filters(workspace_root: Path) -> dict[str, set[str]]:
             stem = entry.stem
             if stem.startswith("_"):
                 continue
-            filters = _parse_filter_registrations(entry)
-            if filters:
-                # If two apps register a library under the same name (rare
-                # but Django allows it — last loaded wins), union the
-                # filter sets so we don't lose either side's completions.
-                out.setdefault(stem, set()).update(filters)
-    return out
+            lib_filters, lib_tags = _parse_registrations(entry)
+            # If two apps register a library under the same name (rare
+            # but Django allows it — last loaded wins), union the sets
+            # so we don't lose either side's completions.
+            if lib_filters:
+                filters.setdefault(stem, set()).update(lib_filters)
+            if lib_tags:
+                tags.setdefault(stem, set()).update(lib_tags)
+    return filters, tags
 
 
-def _parse_filter_registrations(path: Path) -> set[str]:
+# ``register.<attr>`` decorations that register a *tag* (vs. a filter).
+_TAG_REGISTRATION_ATTRS = frozenset({
+    "tag", "simple_tag", "inclusion_tag", "simple_block_tag",
+    # Pre-1.9 spelling, still floating around in old codebases.
+    "assignment_tag",
+})
+
+
+def _parse_registrations(path: Path) -> tuple[set[str], set[str]]:
+    """Return ``(filter_names, tag_names)`` registered in module *path*."""
     try:
         source = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return set()
+        return set(), set()
     try:
         tree = ast.parse(source, filename=str(path))
     except SyntaxError:
-        return set()
-    out: set[str] = set()
+        return set(), set()
+    filters: set[str] = set()
+    tags: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for dec in node.decorator_list:
                 name = _filter_name_from_decorator(dec, node.name)
                 if name is not None:
-                    out.add(name)
+                    filters.add(name)
+                name = _tag_name_from_decorator(dec, node.name)
+                if name is not None:
+                    tags.add(name)
             continue
         if isinstance(node, ast.Call):
             func = node.func
-            if not (isinstance(func, ast.Attribute) and func.attr == "filter"):
+            if not isinstance(func, ast.Attribute):
                 continue
-            # ``register.filter('name', fn)`` requires *both* a string
-            # name and a callable arg — without the callable it's actually
-            # a decorator factory (``@register.filter('name')``) which is
-            # already handled above when walking decorator_list.
+            if func.attr not in ("filter", "tag"):
+                continue
+            # ``register.filter('name', fn)`` / ``register.tag('name', fn)``
+            # require *both* a string name and a callable arg — without the
+            # callable it's actually a decorator factory
+            # (``@register.filter('name')``) which is already handled above
+            # when walking decorator_list.
             if len(node.args) >= 2:
                 a0 = node.args[0]
                 if isinstance(a0, ast.Constant) and isinstance(a0.value, str):
-                    out.add(a0.value)
-    return out
+                    (filters if func.attr == "filter" else tags).add(a0.value)
+    return filters, tags
 
 
 def _filter_name_from_decorator(dec: ast.AST, func_name: str) -> str | None:
@@ -678,6 +926,34 @@ def _filter_name_from_decorator(dec: ast.AST, func_name: str) -> str | None:
             if kw.arg == "name" and isinstance(kw.value, ast.Constant) \
                     and isinstance(kw.value.value, str):
                 return kw.value.value
+        return func_name
+    return None
+
+
+def _tag_name_from_decorator(dec: ast.AST, func_name: str) -> str | None:
+    """Resolve the registered name of a tag decoration, or None.
+
+    Handles ``@register.tag`` / ``@register.simple_tag`` /
+    ``@register.inclusion_tag('tpl.html')`` / ``@register.simple_block_tag``
+    in bare and called forms. An explicit ``name=`` kwarg always wins;
+    ``@register.tag('name')`` also accepts the name positionally. The
+    positional argument of ``inclusion_tag`` is the template filename and
+    is deliberately ignored.
+    """
+    if isinstance(dec, ast.Attribute) and dec.attr in _TAG_REGISTRATION_ATTRS:
+        return func_name
+    if isinstance(dec, ast.Call):
+        func = dec.func
+        if not (isinstance(func, ast.Attribute) and func.attr in _TAG_REGISTRATION_ATTRS):
+            return None
+        for kw in dec.keywords:
+            if kw.arg == "name" and isinstance(kw.value, ast.Constant) \
+                    and isinstance(kw.value.value, str):
+                return kw.value.value
+        if func.attr == "tag" and dec.args:
+            a0 = dec.args[0]
+            if isinstance(a0, ast.Constant) and isinstance(a0.value, str):
+                return a0.value
         return func_name
     return None
 
@@ -1112,6 +1388,152 @@ def _extends_target(text: str) -> str | None:
     if m is None:
         return None
     return m.group(1) or m.group(2)
+
+
+# ---------------------------------------------------------------------------
+# Unloaded-tag scanning
+# ---------------------------------------------------------------------------
+
+
+# Every ``{% tagname`` occurrence — the unloaded-tag scanner's raw feed.
+_ANY_TAG_RE = re.compile(r"\{%-?\s*([A-Za-z_][A-Za-z0-9_]*)")
+
+# Every ``{% ... %}`` / ``{{ ... }}`` construct. Mirrors Django's own
+# lexer regex (``tag_re``), which is not DOTALL — constructs can't span
+# newlines.
+_CONSTRUCT_RE = re.compile(r"\{%.*?%\}|\{\{.*?\}\}")
+
+
+def _filter_uses(source: str):
+    """Yield ``(name, offset)`` for each ``|name`` filter use in *source*.
+
+    Scans only inside ``{{ … }}`` / ``{% … %}`` constructs and tracks
+    string-literal state so the pipe in ``{{ x|default:"a|b" }}`` doesn't
+    produce a phantom ``b`` filter.
+    """
+    for m in _CONSTRUCT_RE.finditer(source):
+        body = m.group(0)
+        base = m.start()
+        in_string: str | None = None
+        i = 0
+        n = len(body)
+        while i < n:
+            ch = body[i]
+            if in_string is not None:
+                if ch == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                if ch == in_string:
+                    in_string = None
+                i += 1
+                continue
+            if ch in "\"'":
+                in_string = ch
+                i += 1
+                continue
+            if ch == "|":
+                start = i + 1
+                j = start
+                while j < n and _is_word_char(body[j]):
+                    j += 1
+                if j > start and (body[start].isalpha() or body[start] == "_"):
+                    yield body[start:j], base + start
+                i = j
+                continue
+            i += 1
+
+
+def _diag_range(source: str, start_offset: int, end_offset: int) -> dict:
+    """Build an LSP range for a same-line span given by ``str`` offsets."""
+    line_start = source.rfind("\n", 0, start_offset) + 1
+    line_no = source.count("\n", 0, start_offset)
+    return {
+        "start": {
+            "line": line_no,
+            "character": _lsp_character_in_line(source, line_start, start_offset),
+        },
+        "end": {
+            "line": line_no,
+            "character": _lsp_character_in_line(source, line_start, end_offset),
+        },
+    }
+
+_VERBATIM_RE = re.compile(
+    r"\{%-?\s*verbatim(?:\s[^%]*)?-?%\}.*?\{%-?\s*endverbatim\s*-?%\}",
+    re.DOTALL,
+)
+_COMMENT_RE = re.compile(
+    r"\{%-?\s*comment(?:\s[^%]*)?-?%\}.*?\{%-?\s*endcomment\s*-?%\}",
+    re.DOTALL,
+)
+
+
+def _excluded_spans(source: str) -> list[tuple[int, int]]:
+    """Spans where ``{% ... %}`` content isn't parsed as a tag.
+
+    ``{% verbatim %}`` and ``{% comment %}`` bodies — tag-looking text
+    inside them never reaches Django's tag parser. HTML comments are
+    *not* excluded: Django parses tags inside ``<!-- -->`` too, so an
+    unloaded tag there still breaks the render.
+    """
+    spans: list[tuple[int, int]] = []
+    for rx in (_VERBATIM_RE, _COMMENT_RE):
+        spans.extend(m.span() for m in rx.finditer(source))
+    return spans
+
+
+def _lsp_position_at(source: str, offset: int) -> dict:
+    line = source.count("\n", 0, offset)
+    line_start = source.rfind("\n", 0, offset) + 1
+    return {
+        "line": line,
+        "character": _lsp_character_in_line(source, line_start, offset),
+    }
+
+
+def _pos_tuple(p: dict) -> tuple[int, int]:
+    return int(p.get("line", 0)), int(p.get("character", 0))
+
+
+def _ranges_overlap(a: dict, b: dict) -> bool:
+    """Inclusive overlap — a zero-width cursor range touching either
+    end of the diagnostic still counts (that's what editors send when
+    the caret merely sits on the squiggle)."""
+    return (
+        _pos_tuple(a["start"]) <= _pos_tuple(b["end"])
+        and _pos_tuple(b["start"]) <= _pos_tuple(a["end"])
+    )
+
+
+def _load_fix_edit(source: str, lib: str) -> tuple[dict, bool]:
+    """Build the TextEdit that loads *lib*; returns ``(edit, appended)``.
+
+    *appended* is True when the edit extends an existing simple
+    ``{% load a b %}`` tag (the ``from`` form gets a fresh line instead
+    — appending a library name to ``{% load x from y %}`` would change
+    its meaning). Otherwise a new ``{% load lib %}`` line is inserted
+    after ``{% extends %}`` when present (Django requires extends to be
+    the template's first tag), else at the very top of the file.
+    """
+    for m in _LOAD_RE.finditer(source):
+        body = m.group(1)
+        if "from" in body.split():
+            continue
+        insert_at = m.start(1) + len(body.rstrip())
+        pos = _lsp_position_at(source, insert_at)
+        return {"range": {"start": pos, "end": pos}, "newText": f" {lib}"}, True
+
+    m = _EXTENDS_RE.search(source)
+    if m is not None:
+        nl = source.find("\n", m.end())
+        if nl >= 0:
+            pos = _lsp_position_at(source, nl + 1)
+            return {"range": {"start": pos, "end": pos}, "newText": f"{{% load {lib} %}}\n"}, False
+        pos = _lsp_position_at(source, len(source))
+        return {"range": {"start": pos, "end": pos}, "newText": f"\n{{% load {lib} %}}\n"}, False
+
+    pos = {"line": 0, "character": 0}
+    return {"range": {"start": pos, "end": pos}, "newText": f"{{% load {lib} %}}\n"}, False
 
 
 # ---------------------------------------------------------------------------

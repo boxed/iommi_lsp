@@ -39,6 +39,19 @@ RELATION_FIELD_NAMES: frozenset[str] = frozenset({
     "ManyToManyField",
 })
 
+# Reverse-relation descriptor types Django mixes into ``_meta.get_fields()``
+# alongside concrete ``Field`` instances. django-stubs types ``get_fields()``
+# as ``list[Field[Any, Any] | ForeignObjectRel]``, so iterating and reaching
+# for a concrete-field attribute (``attname``, ``column``, …) trips ty's
+# ``unresolved-attribute`` on the ``ForeignObjectRel`` arm of the union.
+FIELD_UNION_REL_NAMES: frozenset[str] = frozenset({
+    "ForeignObjectRel",
+    "ManyToOneRel",
+    "OneToOneRel",
+    "ManyToManyRel",
+    "GenericRel",
+})
+
 # Field types whose declarations create a ``<name>_id`` accessor on the
 # declaring model. (``ManyToManyField`` does *not* — it goes through a
 # through-table.)

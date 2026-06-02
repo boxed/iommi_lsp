@@ -34,6 +34,7 @@ from .analyzers.urls import UrlAnalyzer
 from .analyzers.views import ViewsAnalyzer
 from .parse_cache import ParseCache
 from .interceptor import (
+    CodeActionRouter,
     CompletionMatchmaker,
     DefinitionRouter,
     DiagnosticInterceptor,
@@ -229,6 +230,7 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
         analyzers=analyzers, text_provider=documents.get,
     )
     definition_router = DefinitionRouter(analyzers=analyzers)
+    code_action_router = CodeActionRouter(analyzers=analyzers)
 
     async def workspace_seen(root: Path) -> None:
         for a in analyzers:
@@ -246,9 +248,11 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
 
     editor_to_ty = _chain_hooks(
         sniffer, matchmaker.on_request, definition_router.on_request,
+        code_action_router.on_request,
     )
     ty_to_editor = _chain_hooks(
-        matchmaker.on_response, definition_router.on_response, interceptor,
+        matchmaker.on_response, definition_router.on_response,
+        code_action_router.on_response, interceptor,
     )
 
     backend_env = _backend_env(root, os.environ)
@@ -256,6 +260,7 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
     def attach_writer(writer) -> None:
         matchmaker.attach_editor_writer(writer)
         definition_router.attach_editor_writer(writer)
+        code_action_router.attach_editor_writer(writer)
 
     if workspace is not None:
         return asyncio.run(_eager_index_then_serve(

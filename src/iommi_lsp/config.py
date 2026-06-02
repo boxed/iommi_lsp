@@ -54,6 +54,8 @@ RULE_GROUPS: dict[str, frozenset[str]] = {
     "f_operator": frozenset(),             # drops ty's unsupported-operator on F()/Combinable arithmetic
     "annotate": frozenset(),               # drops ty's unresolved-attribute on annotate()/alias() aliases
     "relation_field_assignment": frozenset(),  # drops ty's invalid-assignment on ForeignKey/OneToOneField/ManyToManyField field declarations
+    "field_union": frozenset(),            # drops ty's unresolved-attribute on the ForeignObjectRel arm of _meta.get_fields()'s Field|ForeignObjectRel union
+    "decorator_typevar": frozenset(),      # drops ty's invalid-argument-type ("Expected TypeVar") on require_POST/require_GET-style passthrough decorators
 }
 
 

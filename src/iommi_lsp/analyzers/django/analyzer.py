@@ -37,7 +37,12 @@ from .index import (
     collect_scrapes,
     update_scrapes,
 )
-from .magic import FK_LIKE_FIELD_NAMES, ORM_LOOKUP_NAMES, RELATION_FIELD_NAMES
+from .magic import (
+    FIELD_UNION_REL_NAMES,
+    FK_LIKE_FIELD_NAMES,
+    ORM_LOOKUP_NAMES,
+    RELATION_FIELD_NAMES,
+)
 
 if TYPE_CHECKING:
     from ...config import Config
@@ -756,6 +761,20 @@ class DjangoAnalyzer:
             except Exception:
                 _log.exception("relation-field-assignment check crashed; keeping the diagnostic")
                 return False
+        if (
+            _is_decorator_typevar_argument(diagnostic)
+            and self.config.is_rule_enabled("decorator_typevar")
+        ):
+            try:
+                return self._is_decorator_typevar(uri, diagnostic)
+            except Exception:
+                _log.exception("decorator-typevar check crashed; keeping the diagnostic")
+                return False
+        if (
+            _is_field_union_attribute(diagnostic)
+            and self.config.is_rule_enabled("field_union")
+        ):
+            return True
         if not _is_unresolved_attribute(diagnostic):
             return False
         try:
@@ -831,6 +850,17 @@ class DjangoAnalyzer:
         if call is None:
             return False
         return _call_is_relation_field(call)
+
+    def _is_decorator_typevar(self, uri: str, diagnostic: Diagnostic) -> bool:
+        path = _uri_to_path(uri)
+        if path is None:
+            return False
+        parsed = self._parse(uri, path)
+        if parsed is None:
+            return False
+        start = (diagnostic.get("range") or {}).get("start") or {}
+        line_no = int(start.get("line", 0)) + 1
+        return _decorator_on_line(parsed.tree, line_no)
 
     def _is_first_request_param(self, uri: str, diagnostic: Diagnostic) -> bool:
         path = _uri_to_path(uri)
@@ -1621,6 +1651,47 @@ def _is_unresolved_attribute(diagnostic: Diagnostic) -> bool:
     return False
 
 
+# ty's union-attribute message: ``Attribute `attname` is not defined on
+# `ForeignObjectRel` in union `Field | ForeignObjectRel```. The arm that
+# lacks the attribute is captured as group 1, the full union as group 2.
+_TY_UNION_ATTR_RE = re.compile(
+    r"is not defined on `([^`]+)` in union `([^`]+)`"
+)
+
+
+def _is_field_union_attribute(diagnostic: Diagnostic) -> bool:
+    """Match ty's ``unresolved-attribute`` on the ``ForeignObjectRel`` arm of
+    a ``Field | ForeignObjectRel`` union — Django's ``_meta.get_fields()``.
+
+    ``get_fields()`` is typed (by django-stubs) as
+    ``list[Field[Any, Any] | ForeignObjectRel]``, so the near-universal idiom
+    of iterating it and reading a concrete-field attribute (``attname``,
+    ``column``, ``db_column``, …) makes ty complain that the attribute is
+    missing on the reverse-relation arm. The attribute genuinely is absent on
+    ``ForeignObjectRel``, but in practice code that walks ``get_fields()`` for
+    field metadata is either guarded or only ever sees concrete fields — the
+    warning is noise, so we drop it when the missing-on type is a reverse
+    relation and a ``Field`` is present in the same union.
+    """
+    if not _is_unresolved_attribute(diagnostic):
+        return False
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return False
+    m = _TY_UNION_ATTR_RE.search(message)
+    if m is None:
+        return False
+    missing_on = m.group(1).rsplit(".", 1)[-1]
+    bracket = missing_on.find("[")
+    if bracket != -1:
+        missing_on = missing_on[:bracket]
+    if missing_on not in FIELD_UNION_REL_NAMES:
+        return False
+    # Require a ``Field`` arm so we only swallow the get_fields() shape, not
+    # some unrelated union that happens to include a reverse-relation type.
+    return "Field" in m.group(2)
+
+
 # ty spells the inferred receiver type two ways across versions:
 #   * ``Object of type `Project` has no attribute `id``` (ty-semantic)
 #   * ``Type "Project" has no attribute "id"`` (older)
@@ -1816,6 +1887,42 @@ def _call_is_relation_field(call: ast.Call) -> bool:
         return func.id in RELATION_FIELD_NAMES
     if isinstance(func, ast.Attribute):
         return func.attr in RELATION_FIELD_NAMES
+    return False
+
+
+def _is_decorator_typevar_argument(diagnostic: Diagnostic) -> bool:
+    """Match ty's ``invalid-argument-type`` on a TypeVar-passthrough decorator.
+
+    Django's ``require_POST`` / ``require_GET`` / ``require_safe`` are declared
+    in django-stubs as module variables of type ``Callable[[_F], _F]`` — a free
+    ``TypeVar`` at module scope. ty can't solve that ``_F`` when the variable is
+    used as a decorator, so it reports ``Argument is incorrect: Expected
+    `TypeVar`, found `def view(...) -> ...```. Annotating the view's return type
+    doesn't help (the bind fails regardless), and the call-form
+    ``@require_http_methods([...])`` is unaffected — so this only ever fires on
+    the passthrough-variable decorators and is pure noise. We anchor on the
+    message signature and verify the AST shape (a decorator on that line) in
+    :meth:`DjangoAnalyzer._is_decorator_typevar`.
+    """
+    code = diagnostic.get("code")
+    code_value = code if isinstance(code, str) else (
+        code.get("value") if isinstance(code, dict) else None
+    )
+    if code_value != "invalid-argument-type":
+        return False
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return False
+    return "Expected `TypeVar`" in message and "found `def " in message
+
+
+def _decorator_on_line(tree: ast.Module, line_no: int) -> bool:
+    """Whether any function/class on *tree* carries a decorator on *line_no*
+    (1-indexed). ty's range for the bad argument points at the decorator."""
+    for node in ast.walk(tree):
+        for dec in getattr(node, "decorator_list", None) or ():
+            if getattr(dec, "lineno", None) == line_no:
+                return True
     return False
 
 
