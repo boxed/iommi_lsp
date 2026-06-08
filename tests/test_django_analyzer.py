@@ -70,6 +70,206 @@ def test_custom_queryset_method_is_dropped(tmp_path: Path):
     assert a.is_false_positive(f.as_uri(), diag) is True
 
 
+def test_shared_model_name_disambiguated_by_import(tmp_path: Path):
+    """Two apps define a `Service` model, so the bare-name lookup ties.
+    The using file's import (`from core.models import Service`) pins it to
+    one model, so a reverse-relation access on an instance is recognised
+    and the false unresolved-attribute is suppressed."""
+    for app in ("core", "prospects"):
+        (tmp_path / app).mkdir()
+        (tmp_path / app / "__init__.py").write_text("")
+    (tmp_path / "prospects" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Service(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+    )
+    (tmp_path / "core" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Service(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+        "class ActionChain(models.Model):\n"
+        "    service = models.ForeignKey(Service, on_delete=models.CASCADE,\n"
+        "                                related_name='action_chains')\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    src = (
+        "from core.models import Service\n"
+        "\n"
+        "def f(pk):\n"
+        "    service = Service.objects.get(pk=pk)\n"
+        "    return list(service.action_chains.all())\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    line = 4
+    col = src.splitlines()[line].index("action_chains")
+    diag = _diag(line, col, col + len("action_chains"), "action_chains")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_shared_model_name_genuine_typo_still_kept(tmp_path: Path):
+    """Same shared-name setup, but a genuine typo on the disambiguated
+    model must still surface (no over-suppression)."""
+    for app in ("core", "prospects"):
+        (tmp_path / app).mkdir()
+        (tmp_path / app / "__init__.py").write_text("")
+    (tmp_path / "prospects" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Service(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+    )
+    (tmp_path / "core" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Service(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+        "class ActionChain(models.Model):\n"
+        "    service = models.ForeignKey(Service, on_delete=models.CASCADE,\n"
+        "                                related_name='action_chains')\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    src = (
+        "from core.models import Service\n"
+        "\n"
+        "def f(pk):\n"
+        "    service = Service.objects.get(pk=pk)\n"
+        "    return service.action_chainz\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    line = 4
+    col = src.splitlines()[line].index("action_chainz")
+    diag = _diag(line, col, col + len("action_chainz"), "action_chainz")
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_shared_model_name_disambiguated_by_relative_import(tmp_path: Path):
+    """Same shared-name setup, but the using file reaches the model via a
+    relative import (``from .models import Service``). The package context
+    of the importing module must resolve it to the right app's model."""
+    for app in ("core", "prospects"):
+        (tmp_path / app).mkdir()
+        (tmp_path / app / "__init__.py").write_text("")
+    (tmp_path / "prospects" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Service(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+    )
+    (tmp_path / "core" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Service(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+        "class ActionChain(models.Model):\n"
+        "    service = models.ForeignKey(Service, on_delete=models.CASCADE,\n"
+        "                                related_name='action_chains')\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    # `core/views.py` (module core.views) reaches Service via `.models`.
+    src = (
+        "from .models import Service\n"
+        "\n"
+        "def f(pk):\n"
+        "    service = Service.objects.get(pk=pk)\n"
+        "    return list(service.action_chains.all())\n"
+    )
+    f = tmp_path / "core" / "views.py"
+    f.write_text(src)
+    line = 4
+    col = src.splitlines()[line].index("action_chains")
+    diag = _diag(line, col, col + len("action_chains"), "action_chains")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def _union_diag(line: int, col_start: int, col_end: int, attr: str, missing_on: str, union: str):
+    """A ty ``unresolved-attribute`` whose message reports against one arm
+    of a union type (``Attribute `x` is not defined on `T` in union `…`)."""
+    return {
+        "code": "unresolved-attribute",
+        "message": f"Attribute `{attr}` is not defined on `{missing_on}` in union `{union}`",
+        "range": {
+            "start": {"line": line, "character": col_start},
+            "end": {"line": line, "character": col_end},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+
+
+def test_union_message_reverse_attr_suppressed(tmp_path: Path):
+    """ty reports against one arm of a partially-inferred union
+    (``Unknown | ActionChain``). The AST can't resolve the receiver (it's a
+    list-comprehension rebinding), so resolution falls to the message — the
+    flagged arm ``ActionChain`` does carry the reverse accessor, so suppress."""
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "__init__.py").write_text("")
+    (tmp_path / "shop" / "models.py").write_text(
+        "from django.db import models\n"
+        "class ActionChain(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+        "class Action(models.Model):\n"
+        "    action_chain = models.ForeignKey(ActionChain, on_delete=models.CASCADE,\n"
+        "                                      related_name='actions')\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    src = (
+        "from shop.models import ActionChain\n"
+        "def f(chains):\n"
+        "    chains = [c for c in chains]\n"
+        "    for ac in chains:\n"
+        "        return ac.actions.all()\n"
+    )
+    f = tmp_path / "shop" / "u.py"
+    f.write_text(src)
+    line = 4
+    col = src.splitlines()[line].index(".actions") + 1
+    diag = _union_diag(
+        line, col, col + len("actions"), "actions",
+        "ActionChain", "Unknown | ActionChain",
+    )
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_union_message_genuine_typo_kept(tmp_path: Path):
+    """Same union shape, but the attribute genuinely doesn't exist on the
+    flagged arm — the warning must survive."""
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "__init__.py").write_text("")
+    (tmp_path / "shop" / "models.py").write_text(
+        "from django.db import models\n"
+        "class ActionChain(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+        "class Action(models.Model):\n"
+        "    action_chain = models.ForeignKey(ActionChain, on_delete=models.CASCADE,\n"
+        "                                      related_name='actions')\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    src = (
+        "from shop.models import ActionChain\n"
+        "def f(chains):\n"
+        "    chains = [c for c in chains]\n"
+        "    for ac in chains:\n"
+        "        return ac.bogus_xyz\n"
+    )
+    f = tmp_path / "shop" / "u.py"
+    f.write_text(src)
+    line = 4
+    col = src.splitlines()[line].index(".bogus_xyz") + 1
+    diag = _union_diag(
+        line, col, col + len("bogus_xyz"), "bogus_xyz",
+        "ActionChain", "Unknown | ActionChain",
+    )
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
 def test_unknown_method_on_manager_is_kept(tmp_path: Path):
     """A genuinely unknown method (no workspace QuerySet defines it) stays."""
     (tmp_path / "shop").mkdir()

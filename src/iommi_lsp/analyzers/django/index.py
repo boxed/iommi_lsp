@@ -293,6 +293,62 @@ def _resolve_base(base_str: str, imports: dict[str, str]) -> str:
     return base_str
 
 
+def _resolve_relative_module(
+    module: str | None, level: int, submodule: str | None, *, is_package: bool
+) -> str | None:
+    """Absolute qualname an ``from <dots><submodule> import …`` points at.
+
+    *module* is the qualname of the importing file (``a.b.mod`` or, for a
+    package ``__init__``, ``a.b``). Python anchors relative imports at the
+    file's *package*: the module itself when it's a package, else its
+    parent. ``level`` 1 is that package, each extra level climbs one more.
+    Returns ``None`` when the import reaches above the top-level package or
+    the module qualname is unknown.
+    """
+    if not module:
+        return None
+    parts = module.split(".")
+    pkg_parts = parts if is_package else parts[:-1]
+    up = level - 1
+    if up > len(pkg_parts):
+        return None
+    base_parts = pkg_parts[: len(pkg_parts) - up]
+    pieces = base_parts + ([submodule] if submodule else [])
+    if not pieces:
+        return None
+    return ".".join(pieces)
+
+
+def _build_import_map(
+    tree: ast.Module, module: str | None, *, is_package: bool
+) -> dict[str, str]:
+    """Map each name a file binds via import to its source qualname.
+
+    ``from a.b import C`` → ``{'C': 'a.b.C'}`` (honouring ``as`` aliases),
+    ``import a.b`` → ``{'a': 'a'}``, and relative imports
+    (``from .models import C``) resolved against *module*'s package.
+    """
+    imports: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports[alias.asname or alias.name.split(".")[0]] = (
+                    alias.name if alias.asname else alias.name.split(".")[0]
+                )
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                resolved = _resolve_relative_module(
+                    module, node.level, node.module, is_package=is_package
+                )
+            else:
+                resolved = node.module
+            if not resolved:
+                continue
+            for alias in node.names:
+                imports[alias.asname or alias.name] = f"{resolved}.{alias.name}"
+    return imports
+
+
 def _scrape_file(
     path: Path, module: str, *, source: str | None = None
 ) -> _FileScrape | None:
@@ -308,21 +364,9 @@ def _scrape_file(
         _log.debug("skipping %s (syntax error): %s", path, e)
         return None
 
-    imports: dict[str, str] = {}
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                imports[alias.asname or alias.name.split(".")[0]] = (
-                    alias.name if alias.asname else alias.name.split(".")[0]
-                )
-        elif isinstance(node, ast.ImportFrom):
-            if node.module is None or node.level:
-                # Skip relative imports for v1 — tracking package context
-                # would require building a package tree first.
-                continue
-            for alias in node.names:
-                local = alias.asname or alias.name
-                imports[local] = f"{node.module}.{alias.name}"
+    imports = _build_import_map(
+        tree, module, is_package=path.name == "__init__.py"
+    )
 
     classes: list[_RawClass] = []
     for node in ast.walk(tree):
@@ -398,10 +442,18 @@ def _classify_models(raws: list[_RawClass]) -> dict[str, _RawClass]:
                     is_model[r.qualname] = True
                     changed = True
                     break
-                # Same-file or unresolved-but-simple-name base. Walk through
-                # all classes in the project with that simple name (head).
-                head = base.split(".")[-1]
-                same_name_candidates = by_simple.get(head, ())
+                # Same-file or unresolved bare-name base. Walk through all
+                # classes in the project with that simple name. Restricted
+                # to *bare* bases (no dot): a dotted base like
+                # ``iommi.Action`` names a specific external class, and
+                # matching it to a workspace model purely by the colliding
+                # tail (``Action``) misclassifies every ``class Foo(lib.Foo)``
+                # whose name happens to shadow a real model. Properly-imported
+                # workspace bases resolve to a full qualname and are caught by
+                # the exact-qualname check above.
+                if "." in base:
+                    continue
+                same_name_candidates = by_simple.get(base, ())
                 if any(is_model.get(c.qualname) for c in same_name_candidates):
                     is_model[r.qualname] = True
                     changed = True
@@ -499,6 +551,19 @@ def _resolve_fk_target(
     workspace model shadows a same-named builtin (the same rule that
     governs receiver resolution at scan time).
     """
+    def _pick(simple: str) -> str | None:
+        # A bare reference resolves to a class defined in the *same module*
+        # if one exists there — Python scoping guarantees the local class
+        # wins. This disambiguates simple names shared across apps (two
+        # ``Service`` models in different apps) where ``lookup`` would tie
+        # and give up.
+        module = self_qualname.rsplit(".", 1)[0]
+        same_module = f"{module}.{simple}"
+        if same_module in index.models:
+            return same_module
+        info = index.lookup(simple)
+        return info.qualname if info is not None else None
+
     s = _string_value(arg)
     if s is not None:
         if s == "self":
@@ -509,15 +574,13 @@ def _resolve_fk_target(
             simple = s.rsplit(".", 1)[-1]
         else:
             simple = s
-        info = index.lookup(simple)
-        return info.qualname if info is not None else None
+        return _pick(simple)
     # Bare Name — `User`, possibly imported.
     if isinstance(arg, ast.Name):
         local = arg.id
         if local in file_imports:
             return file_imports[local]
-        info = index.lookup(local)
-        return info.qualname if info is not None else None
+        return _pick(local)
     # Attribute — `myapp.models.User`.
     flat = _flatten_attribute(arg)
     if flat is not None:

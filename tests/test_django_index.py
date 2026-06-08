@@ -141,6 +141,106 @@ def test_workspace_model_shadows_builtin(tmp_path: Path):
     assert "extra" in info.fields
 
 
+def test_dotted_base_sharing_model_name_is_not_classified(tmp_path: Path):
+    # A non-model class whose simple name collides with a real model and
+    # which inherits from a *dotted* external base (``iommi.Action``) must
+    # NOT be classified as a Django model. Otherwise it poisons
+    # ``lookup('Action')`` into ambiguity and FK ``_id`` suppression breaks.
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "__init__.py").write_text("")
+    (tmp_path / "shop" / "models.py").write_text(
+        "from django.db import models\n"
+        "class ActionChain(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+        "class Action(models.Model):\n"
+        "    action_chain = models.ForeignKey(ActionChain, on_delete=models.CASCADE)\n"
+    )
+    (tmp_path / "shop" / "components.py").write_text(
+        "import iommi\n"
+        "class Action(iommi.Action):\n"
+        "    pass\n"
+    )
+    idx = build_index(tmp_path)
+    # Only the real Django model is classified.
+    assert "shop.components.Action" not in idx.models
+    assert idx.by_simple_name.get("Action") == ["shop.models.Action"]
+    # lookup resolves unambiguously, so the FK-id accessor is reachable.
+    info = idx.lookup("Action")
+    assert info is not None
+    assert info.qualname == "shop.models.Action"
+    assert "action_chain_id" in info.fk_id_accessors
+
+
+def test_fk_target_to_same_module_model_with_shared_name(tmp_path: Path):
+    # Two apps each define a `Service` model. A FK pointing at the bare
+    # name `Service` from within one app's models module must resolve to
+    # *that module's* Service (Python scoping), not give up on the tie.
+    # Otherwise the reverse relation is never registered.
+    for app in ("core", "prospects"):
+        (tmp_path / app).mkdir()
+        (tmp_path / app / "__init__.py").write_text("")
+    (tmp_path / "prospects" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Service(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+    )
+    (tmp_path / "core" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Service(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+        "class ActionChain(models.Model):\n"
+        "    service = models.ForeignKey(Service, on_delete=models.CASCADE,\n"
+        "                                related_name='action_chains')\n"
+    )
+    idx = build_index(tmp_path)
+    chain = idx.models["core.models.ActionChain"]
+    # Resolves to the same-module Service, not None and not the other app's.
+    assert chain.fields["service"].target == "core.models.Service"
+    # Reverse relation lands on the right Service only.
+    assert "action_chains" in idx.reverse_relations["core.models.Service"]
+    assert "action_chains" not in (
+        idx.reverse_relations.get("prospects.models.Service") or {}
+    )
+
+
+def test_relative_import_base_and_fk_target_resolve(tmp_path: Path):
+    # A model whose abstract base and FK target are reached via relative
+    # imports must still classify and resolve. Exercises level-1
+    # (``from .base import``) and level-2 (``from ..other.models import``).
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "proj" / "__init__.py").write_text("")
+    for app in ("core", "other"):
+        (tmp_path / "proj" / app).mkdir()
+        (tmp_path / "proj" / app / "__init__.py").write_text("")
+    (tmp_path / "proj" / "core" / "base.py").write_text(
+        "from django.db import models\n"
+        "class Timestamped(models.Model):\n"
+        "    created = models.DateTimeField(auto_now_add=True)\n"
+        "    class Meta:\n"
+        "        abstract = True\n"
+    )
+    (tmp_path / "proj" / "other" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Category(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+    )
+    (tmp_path / "proj" / "core" / "models.py").write_text(
+        "from django.db import models\n"
+        "from .base import Timestamped\n"
+        "from ..other.models import Category\n"
+        "class Product(Timestamped):\n"
+        "    category = models.ForeignKey(Category, on_delete=models.CASCADE,\n"
+        "                                 related_name='products')\n"
+    )
+    idx = build_index(tmp_path)
+    product = idx.models["proj.core.models.Product"]
+    # Classified as a model via the relatively-imported abstract base.
+    assert "created" in product.fields  # inherited from Timestamped
+    # FK target resolved through the level-2 relative import.
+    assert product.fields["category"].target == "proj.other.models.Category"
+    assert "products" in idx.reverse_relations["proj.other.models.Category"]
+
+
 def test_foreign_key_subclass_treated_as_foreign_key(tmp_path: Path):
     # A subclass of ForeignKey must be recognised as a ForeignKey by the
     # index so reverse relations / `<name>_id` accessors are still computed.

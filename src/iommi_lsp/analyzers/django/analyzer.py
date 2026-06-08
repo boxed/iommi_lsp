@@ -33,6 +33,8 @@ from .index import (
     DjangoIndex,
     ModelInfo,
     _FileScrape,
+    _build_import_map,
+    _module_qualname,
     assemble_index,
     collect_scrapes,
     update_scrapes,
@@ -136,6 +138,12 @@ class DjangoAnalyzer:
         self._parse_provider = parse_provider
         self._cache: dict[str, _ParsedFile] = {}
         self._scrapes: dict[Path, _FileScrape] = {}
+        # Per-request file context for import/same-module-aware name
+        # resolution. Set by ``_enter_file_context`` at each entry point;
+        # consumed by ``_lookup``. Single-threaded per request, so plain
+        # instance state is safe.
+        self._ctx_module: str | None = None
+        self._ctx_imports: dict[str, str] = {}
 
     # -- Analyzer protocol ----------------------------------------------------
 
@@ -182,6 +190,7 @@ class DjangoAnalyzer:
         parsed = self._parse(uri, path)
         if parsed is None:
             return False
+        self._enter_file_context(path, parsed.tree)
 
         attr_node = _find_attribute_at(parsed.tree, diagnostic.get("range") or {})
         if attr_node is None:
@@ -282,13 +291,13 @@ class DjangoAnalyzer:
         owner = receiver.value
         # ``Model.objects.method`` — owner is a Name resolving to a model.
         if isinstance(owner, ast.Name):
-            if self.django_index.lookup(owner.id) is not None:
+            if self._lookup(owner.id) is not None:
                 return True
             local = self._resolve_local_variable(owner.id, owner, tree)
             return local is not None
         # ``models.User.objects.method`` — dotted-path access.
         if isinstance(owner, ast.Attribute):
-            return self.django_index.lookup(owner.attr) is not None
+            return self._lookup(owner.attr) is not None
         return False
 
     def _is_m2m_receiver(self, receiver: ast.AST, tree: ast.Module) -> bool:
@@ -337,12 +346,45 @@ class DjangoAnalyzer:
             _log.debug("could not read %s: %s", path, e)
             return None
 
+    def _enter_file_context(self, path: Path, tree: ast.Module) -> None:
+        """Record the current file's module + import map for name resolution.
+
+        ``lookup`` ties (and gives up) when a simple name is shared by
+        models in different apps. The declaring file's imports and its own
+        module pin the name down — ``from a.models import Service`` means
+        ``Service`` in this file is ``a.models.Service``, full stop.
+        """
+        self._ctx_module = _module_qualname(self.workspace_root, path)
+        self._ctx_imports = _build_import_map(
+            tree, self._ctx_module, is_package=path.name == "__init__.py"
+        )
+
+    def _lookup(self, simple_name: str) -> ModelInfo | None:
+        """Resolve a bare model name using the current file's context.
+
+        Import binding wins (it's authoritative for this file), then a
+        same-module definition, then the index's generic simple-name
+        ``lookup`` (which keeps the workspace-shadows-builtin rule). Each
+        precise step only fires when it lands on a known model, so an
+        import of a non-model name harmlessly falls through.
+        """
+        imports = self._ctx_imports
+        if simple_name in imports:
+            info = self.django_index.models.get(imports[simple_name])
+            if info is not None:
+                return info
+        if self._ctx_module is not None:
+            info = self.django_index.models.get(f"{self._ctx_module}.{simple_name}")
+            if info is not None:
+                return info
+        return self.django_index.lookup(simple_name)
+
     def _resolve_receiver_model(
         self, receiver: ast.AST, tree: ast.Module
     ) -> ModelInfo | None:
         # (a) Syntactic match: bare Name -> class lookup by simple name.
         if isinstance(receiver, ast.Name):
-            model = self.django_index.lookup(receiver.id)
+            model = self._lookup(receiver.id)
             if model is not None:
                 return model
             # (b) Local flow: search enclosing scope for an assignment.
@@ -431,7 +473,7 @@ class DjangoAnalyzer:
             and value.attr in _MANAGER_NAMES
             and isinstance(value.value, ast.Name)
         ):
-            return self.django_index.lookup(value.value.id)
+            return self._lookup(value.value.id)
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
             method = value.func.attr
             if method in _QUERY_METHODS_RETURNING_QUERYSET:
@@ -473,7 +515,7 @@ class DjangoAnalyzer:
         if var_name == "self":
             cls = _enclosing_class(tree, receiver)
             if cls is not None:
-                model = self.django_index.lookup(cls.name)
+                model = self._lookup(cls.name)
                 if model is not None:
                     return model
 
@@ -521,36 +563,45 @@ class DjangoAnalyzer:
         ty-semantic emits ``Object of type `Project` has no attribute `id```
         even for receivers we can't reach from the AST (decorator-wrapped
         params with no annotation, etc.). Older variants spell it
-        ``Type "Project" has no attribute "id"``. We treat the named type
-        as a model when ``django_index`` recognises it; an unknown name
-        falls through and the diagnostic is kept.
+        ``Type "Project" has no attribute "id"``. A third shape appears when
+        ty only partially infers the receiver and reports against one arm of
+        a union: ``Attribute `actions` is not defined on `ActionChain` in
+        union `Unknown | ActionChain```. The arm ty checked against (here
+        ``ActionChain``) is the receiver type we care about. We treat the
+        named type as a model when ``django_index`` recognises it; an
+        unknown name falls through and the diagnostic is kept.
         """
         if not isinstance(message, str):
             return None
         m = _TY_RECEIVER_TYPE_RE.search(message)
-        if m is None:
-            return None
+        if m is not None:
+            raw = _ty_receiver_type_name(m)
+        else:
+            # Union form: the type after ``on`` is the arm ty flagged.
+            um = _TY_UNION_ATTR_RE.search(message)
+            if um is None:
+                return None
+            raw = um.group(1)
         # Strip generic suffix like ``list[Project]`` → ``Project``: ty
         # may quote the full inferred type and the bare class name is
         # what the index keys on. Also dotted-qualified names get tailed.
-        raw = _ty_receiver_type_name(m)
         tail = raw.rsplit(".", 1)[-1]
         bracket = tail.find("[")
         if bracket != -1:
             tail = tail[:bracket]
-        return self.django_index.lookup(tail)
+        return self._lookup(tail)
 
     def _model_from_annotation(self, ann: ast.AST | None) -> ModelInfo | None:
         if ann is None:
             return None
         if isinstance(ann, ast.Name):
-            return self.django_index.lookup(ann.id)
+            return self._lookup(ann.id)
         if isinstance(ann, ast.Attribute):
-            return self.django_index.lookup(ann.attr)
+            return self._lookup(ann.attr)
         if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
             # Quoted/forward-ref: `"Profile"` or `"app.models.Profile"`.
             simple = ann.value.rsplit(".", 1)[-1]
-            return self.django_index.lookup(simple)
+            return self._lookup(simple)
         if isinstance(ann, ast.Subscript):
             # Unwrap `Optional[Profile]` / `list[Profile]` / `X | Y` slice.
             return self._model_from_annotation(ann.slice)
@@ -580,7 +631,7 @@ class DjangoAnalyzer:
             return self.django_index.lookup("User")
         # Model(...) — direct instantiation.
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
-            return self.django_index.lookup(value.func.id)
+            return self._lookup(value.func.id)
         # ``Model.objects.<...>.<terminal>(...)`` — terminal returns an
         # instance, the prefix may include any number of queryset-returning
         # methods (``filter``/``exclude``/``order_by``/...). The prefix
@@ -907,6 +958,7 @@ class DjangoAnalyzer:
         parsed = self._parse(uri, path)
         if parsed is None:
             return None
+        self._enter_file_context(path, parsed.tree)
 
         line = int(position.get("line", 0))
         character = int(position.get("character", 0))
@@ -966,6 +1018,7 @@ class DjangoAnalyzer:
         parsed = self._parse(uri, path)
         if parsed is None:
             return []
+        self._enter_file_context(path, parsed.tree)
         try:
             return list(self._scan_lookups(parsed))
         except Exception:
@@ -1000,17 +1053,19 @@ class DjangoAnalyzer:
             return empty
         try:
             if self.config.is_rule_enabled("orm_lookup"):
-                result = self._scan_completions(source, position)
+                result = self._scan_completions(source, position, path)
                 if result.items or result.exclusive:
                     return result
             if self.config.is_rule_enabled("fk_id"):
-                return self._scan_fk_id_completions(source, position)
+                return self._scan_fk_id_completions(source, position, path)
             return empty
         except Exception:
             _log.exception("completion scanner crashed; emitting nothing")
             return empty
 
-    def _scan_completions(self, source: str, position: dict) -> CompletionResult:
+    def _scan_completions(
+        self, source: str, position: dict, path: Path,
+    ) -> CompletionResult:
         empty = CompletionResult()
         line = int(position.get("line", 0))
         character = int(position.get("character", 0))
@@ -1054,6 +1109,7 @@ class DjangoAnalyzer:
             tree = ast.parse(patched)
         except SyntaxError:
             return empty
+        self._enter_file_context(path, tree)
 
         marker_call = _find_marker_call(tree, marker)
         if marker_call is None:
@@ -1103,7 +1159,7 @@ class DjangoAnalyzer:
         return CompletionResult(items=items, exclusive=True)
 
     def _scan_fk_id_completions(
-        self, source: str, position: dict
+        self, source: str, position: dict, path: Path,
     ) -> CompletionResult:
         """Suggest ``<field>_id`` accessors after ``<receiver>.``.
 
@@ -1144,6 +1200,7 @@ class DjangoAnalyzer:
             tree = ast.parse(patched)
         except SyntaxError:
             return empty
+        self._enter_file_context(path, tree)
 
         target: ast.Attribute | None = None
         for node in ast.walk(tree):
@@ -1253,10 +1310,10 @@ class DjangoAnalyzer:
           or any chain of queryset methods on the same.
         """
         if isinstance(arg, ast.Name):
-            return self.django_index.lookup(arg.id)
+            return self._lookup(arg.id)
         if isinstance(arg, ast.Attribute):
             # ``foo.bar.Model`` — match the rightmost segment.
-            return self.django_index.lookup(arg.attr)
+            return self._lookup(arg.attr)
         # Manager chain: ``User.objects.filter(...)`` → same resolver as
         # method-call form.
         return self._root_manager_model(arg, tree)
@@ -1428,7 +1485,7 @@ class DjangoAnalyzer:
                 return None
             owner = cur.value
             if isinstance(owner, ast.Name):
-                info = self.django_index.lookup(owner.id)
+                info = self._lookup(owner.id)
                 if info is not None:
                     return info
                 # Fall back to local-flow resolution: ``UserCls =
@@ -1440,7 +1497,7 @@ class DjangoAnalyzer:
                 return None
             if isinstance(owner, ast.Attribute):
                 # `models.User.objects` / `app.models.User.objects`.
-                return self.django_index.lookup(owner.attr)
+                return self._lookup(owner.attr)
             return None
 
         # Bare name — could be a local queryset variable.
