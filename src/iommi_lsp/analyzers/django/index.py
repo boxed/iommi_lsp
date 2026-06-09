@@ -134,6 +134,12 @@ class DjangoIndex:
     # any manager attribute access. Bias is toward false negatives, in
     # line with the rest of the analyzer.
     custom_queryset_methods: set[str] = field(default_factory=set)
+    # class qualname -> concrete model qualnames that transitively inherit
+    # it. Keyed by *any* class in the base graph, including non-model
+    # mixins (e.g. a plain ``class DuplicateSupport:`` mixed into models),
+    # so ``self`` inside a mixin method can be resolved to the models that
+    # actually use it. Excludes the class itself.
+    descendants_of: dict[str, frozenset[str]] = field(default_factory=dict)
 
     def add_model(self, info: ModelInfo) -> None:
         self.models[info.qualname] = info
@@ -829,7 +835,58 @@ def assemble_index(
         _collect_queryset_method_names(raws)
     )
 
+    # Sixth pass: map every class in the base graph to the concrete models
+    # that inherit it, so ``self`` inside a non-model mixin resolves to its
+    # concrete model users.
+    index.descendants_of = _build_descendant_map(raws, index.models)
+
     return index
+
+
+def _build_descendant_map(
+    raws: list[_RawClass], models: dict[str, ModelInfo]
+) -> dict[str, frozenset[str]]:
+    """For each class qualname, the concrete (non-abstract) model qualnames
+    that transitively inherit from it.
+
+    Walks the full base graph across model *and* non-model classes — the
+    point is to reach plain mixins that never get classified as models — and
+    resolves bases by exact qualname first, then by simple name (same-file
+    or unresolved references), mirroring :func:`_classify_models`.
+    """
+    by_qual = {r.qualname: r for r in raws}
+    by_simple: dict[str, list[_RawClass]] = defaultdict(list)
+    for r in raws:
+        by_simple[r.name].append(r)
+
+    def ancestors(start: str) -> set[str]:
+        seen: set[str] = set()
+        stack = [start]
+        while stack:
+            cur = stack.pop()
+            r = by_qual.get(cur)
+            if r is None:
+                continue
+            for base in r.resolved_bases:
+                if base in by_qual:
+                    cands = [base]
+                else:
+                    head = base.split(".")[-1]
+                    cands = [c.qualname for c in by_simple.get(head, ())]
+                for c in cands:
+                    if c not in seen:
+                        seen.add(c)
+                        stack.append(c)
+        seen.discard(start)
+        return seen
+
+    descendants: dict[str, set[str]] = defaultdict(set)
+    for qualname, info in models.items():
+        if info.abstract:
+            continue
+        for anc in ancestors(qualname):
+            descendants[anc].add(qualname)
+    return {k: frozenset(v) for k, v in descendants.items()}
 
 
 _QUERYSET_BASES = frozenset({

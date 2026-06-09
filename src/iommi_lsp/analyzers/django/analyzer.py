@@ -274,7 +274,70 @@ class DjangoAnalyzer:
         if msg_model is not None and self._attr_is_magic(msg_model, attr_name):
             return True
 
+        # ``Self``-typed receiver inside a method whose class is (or is a
+        # mixin/base of) a model. ty types these as ``Self@<method>`` —
+        # covering ``self`` directly *and* locals like ``result =
+        # deepcopy(self)`` — bound to the defining class, which the
+        # resolvers above miss when that class isn't itself a model.
+        if self._self_typed_receiver_is_magic(
+            attr_node, attr_name, diagnostic.get("message"), parsed.tree
+        ):
+            return True
+
         return False
+
+    def _self_typed_receiver_is_magic(
+        self,
+        attr_node: ast.Attribute,
+        attr_name: str,
+        message: object,
+        tree: ast.Module,
+    ) -> bool:
+        """Suppress Django-magic attribute access on a ``Self``-typed receiver.
+
+        ty reports the receiver type as ``Self@<method>`` (or
+        ``type[Self@<method>]``) — bound to the class that defines the
+        enclosing method — whenever the value is ``self`` or any local that
+        inherits its type, e.g. ``result = deepcopy(self)``. So we key off
+        that message marker and the *enclosing class of the attribute*,
+        rather than the receiver expression.
+
+        When that class is itself a model we check it directly. When it's a
+        non-model mixin/base, ``self`` is nonetheless a model instance at
+        runtime, so we resolve to the concrete models inheriting it and
+        suppress only when *attr_name* resolves on **every** one of them.
+        Universal magic (``pk``, ``_meta``, ``objects``, …) qualifies
+        unconditionally; a model-specific name — declared field, reverse
+        relation, or ``<fk>_id`` accessor — qualifies only if all the
+        users share it, so a genuine typo on some-but-not-all still
+        surfaces. (Declared fields are accepted because inside the base
+        ``self`` is the field-less mixin, where ty can't see them.)
+        """
+        if not isinstance(message, str) or "Self@" not in message:
+            return False
+        if self._ctx_module is None:
+            return False
+        cls = _enclosing_class(tree, attr_node)
+        if cls is None:
+            return False
+        qualname = f"{self._ctx_module}.{cls.name}"
+
+        def resolves_on(m: ModelInfo) -> bool:
+            return self._attr_is_magic(m, attr_name) or attr_name in m.field_names
+
+        info = self.django_index.models.get(qualname)
+        if info is not None:
+            return resolves_on(info)
+
+        descendants = self.django_index.descendants_of.get(qualname)
+        if not descendants:
+            return False
+        models = [
+            self.django_index.models[q]
+            for q in descendants
+            if q in self.django_index.models
+        ]
+        return bool(models) and all(resolves_on(m) for m in models)
 
     def _is_manager_method_access(
         self, receiver: ast.AST, attr_name: str, tree: ast.Module,

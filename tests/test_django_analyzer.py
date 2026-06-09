@@ -185,6 +185,108 @@ def test_shared_model_name_disambiguated_by_relative_import(tmp_path: Path):
     assert a.is_false_positive(f.as_uri(), diag) is True
 
 
+def _self_diag(line: int, col_start: int, col_end: int, attr: str, method: str):
+    """A ty ``unresolved-attribute`` whose receiver is a ``Self@<method>``
+    type — what ty emits for ``self`` and Self-typed locals inside a method."""
+    return {
+        "code": "unresolved-attribute",
+        "message": f"Object of type `Self@{method}` has no attribute `{attr}`",
+        "range": {
+            "start": {"line": line, "character": col_start},
+            "end": {"line": line, "character": col_end},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+
+
+_MIXIN_CORPUS = (
+    "from django.db import models\n"
+    "import copy\n"
+    "class DuplicateSupport:\n"
+    "    def duplicate(self):\n"
+    "        result = copy.deepcopy(self)\n"
+    "        result.based_on_id = self.pk\n"   # fk_id + universal magic
+    "        if result.master is not None:\n"  # declared field on all users
+    "            return result.children\n"     # not on any user -> kept
+    "class Object(models.Model, DuplicateSupport):\n"
+    "    master = models.ForeignKey('Master', on_delete=models.CASCADE)\n"
+    "    based_on = models.ForeignKey('self', null=True, on_delete=models.SET_NULL)\n"
+    "class Service(models.Model, DuplicateSupport):\n"
+    "    master = models.ForeignKey('Master', on_delete=models.CASCADE)\n"
+    "    based_on = models.ForeignKey('self', null=True, on_delete=models.SET_NULL)\n"
+    "class Master(models.Model):\n"
+    "    name = models.CharField(max_length=50)\n"
+)
+
+
+def test_self_typed_receiver_in_mixin_suppressed(tmp_path: Path):
+    """``self``/Self-typed locals inside a non-model mixin resolve to the
+    concrete models that inherit it. Universal magic (``pk``), shared
+    declared fields (``master``), and shared ``<fk>_id`` accessors
+    (``based_on_id``) are suppressed; this covers both ``self`` and
+    ``result = deepcopy(self)`` since ty types both as ``Self@duplicate``."""
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "__init__.py").write_text("")
+    (tmp_path / "shop" / "models.py").write_text(_MIXIN_CORPUS)
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+    f = tmp_path / "shop" / "models.py"
+    src = f.read_text().splitlines()
+
+    def check(lineno_1, recv_attr, method):
+        line = src[lineno_1 - 1]
+        attr = recv_attr.split(".", 1)[1]
+        col = line.index(recv_attr) + recv_attr.index(".") + 1
+        return a.is_false_positive(
+            f.as_uri(), _self_diag(lineno_1 - 1, col, col + len(attr), attr, method)
+        )
+
+    assert check(6, "self.pk", "duplicate") is True            # universal magic
+    assert check(6, "result.based_on_id", "duplicate") is True  # shared fk_id
+    assert check(7, "result.master", "duplicate") is True       # shared field
+
+
+def test_self_typed_receiver_in_mixin_typo_kept(tmp_path: Path):
+    """An attribute that doesn't resolve on the mixin's users still surfaces."""
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "__init__.py").write_text("")
+    (tmp_path / "shop" / "models.py").write_text(_MIXIN_CORPUS)
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+    f = tmp_path / "shop" / "models.py"
+    src = f.read_text().splitlines()
+    line = src[7]
+    col = line.index("result.children") + len("result")
+    diag = _self_diag(7, col, col + len("children"), "children", "duplicate")
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_self_typed_field_on_only_some_users_kept(tmp_path: Path):
+    """A field present on one mixin user but not another must NOT be
+    suppressed — it's a latent bug for the user that lacks it."""
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "__init__.py").write_text("")
+    (tmp_path / "shop" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Mixin:\n"
+        "    def go(self):\n"
+        "        return self.only_on_a\n"
+        "class A(models.Model, Mixin):\n"
+        "    only_on_a = models.CharField(max_length=5)\n"
+        "class B(models.Model, Mixin):\n"
+        "    name = models.CharField(max_length=5)\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+    f = tmp_path / "shop" / "models.py"
+    src = f.read_text().splitlines()
+    line = src[3]
+    col = line.index(".only_on_a") + 1
+    diag = _self_diag(3, col, col + len("only_on_a"), "only_on_a", "go")
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
 def _union_diag(line: int, col_start: int, col_end: int, attr: str, missing_on: str, union: str):
     """A ty ``unresolved-attribute`` whose message reports against one arm
     of a union type (``Attribute `x` is not defined on `T` in union `…`)."""
@@ -268,6 +370,42 @@ def test_union_message_genuine_typo_kept(tmp_path: Path):
         "ActionChain", "Unknown | ActionChain",
     )
     assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_self_reverse_attr_in_model_method_with_shared_name(tmp_path: Path):
+    """``self.<reverse>`` inside a model method must resolve even when the
+    model's simple name is shared across apps. ty reports the receiver as
+    ``Self@<method>``; resolution goes through the enclosing class, whose
+    name is disambiguated by the file's own module."""
+    for app in ("core", "prospects"):
+        (tmp_path / app).mkdir()
+        (tmp_path / app / "__init__.py").write_text("")
+    # A second `Service` elsewhere makes the bare name ambiguous.
+    (tmp_path / "core" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Service(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+    )
+    (tmp_path / "prospects" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Service(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+        "    def zero_out(self):\n"
+        "        return self.moments.all()\n"
+        "class Moment(models.Model):\n"
+        "    service = models.ForeignKey(Service, on_delete=models.CASCADE,\n"
+        "                                related_name='moments')\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    f = tmp_path / "prospects" / "models.py"
+    src = f.read_text()
+    line = 4  # `        return self.moments.all()`
+    col = src.splitlines()[line].index(".moments") + 1
+    diag = _diag(line, col, col + len("moments"), "moments")
+    diag["message"] = "Object of type `Self@zero_out` has no attribute `moments`"
+    assert a.is_false_positive(f.as_uri(), diag) is True
 
 
 def test_unknown_method_on_manager_is_kept(tmp_path: Path):

@@ -203,6 +203,33 @@ def test_fk_target_to_same_module_model_with_shared_name(tmp_path: Path):
     )
 
 
+def test_descendants_of_maps_mixin_to_concrete_models(tmp_path: Path):
+    # A plain (non-model) mixin should map to the concrete models that
+    # inherit it, transitively and through intermediate bases.
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "__init__.py").write_text("")
+    (tmp_path / "shop" / "models.py").write_text(
+        "from django.db import models\n"
+        "class DuplicateSupport:\n"
+        "    pass\n"
+        "class Base(models.Model, DuplicateSupport):\n"
+        "    class Meta:\n"
+        "        abstract = True\n"
+        "class Object(Base):\n"
+        "    name = models.CharField(max_length=50)\n"
+        "class Service(models.Model, DuplicateSupport):\n"
+        "    name = models.CharField(max_length=50)\n"
+    )
+    idx = build_index(tmp_path)
+    mixin = "shop.models.DuplicateSupport"
+    # Object reaches the mixin through the abstract Base; Service directly.
+    assert idx.descendants_of.get(mixin) == frozenset({
+        "shop.models.Object", "shop.models.Service",
+    })
+    # Abstract bases are not concrete models and must not appear.
+    assert "shop.models.Base" not in idx.descendants_of.get(mixin, frozenset())
+
+
 def test_relative_import_base_and_fk_target_resolve(tmp_path: Path):
     # A model whose abstract base and FK target are reached via relative
     # imports must still classify and resolve. Exercises level-1
