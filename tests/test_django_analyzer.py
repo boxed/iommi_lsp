@@ -1845,6 +1845,75 @@ def test_unused_request_local_variable_is_kept(tmp_path: Path):
     assert a.is_false_positive(f.as_uri(), diag) is False
 
 
+def test_unused_request_on_decorated_module_view_is_dropped(tmp_path: Path):
+    """Real-world shape: a decorated module-level view ``@x.allow / def v(request):``.
+
+    Regression for the case actually seen in the wild — ty reports the hint
+    at the parameter even when the function carries a decorator. The
+    decorator must not throw off the first-param match (the param's own
+    lineno/col is what counts, not the function's).
+    """
+    src = (
+        "import permissions\n"
+        "\n"
+        "\n"
+        "@permissions.allow\n"
+        "def blank_internal(request):\n"
+        "    return None\n"
+    )
+    f = tmp_path / "views.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 4
+    start = src.splitlines()[line].index("request")
+    diag = _unused_diag(line, start, start + len("request"))
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+@pytest.mark.asyncio
+async def test_unused_request_dropped_end_to_end_through_interceptor(tmp_path: Path):
+    """End-to-end: the hint is stripped from the publishDiagnostics frame the
+    editor sees, not merely flagged by ``is_false_positive`` in isolation.
+
+    This guards the whole path — interceptor → analyzer → first-param check —
+    so a regression anywhere in the chain (not just the predicate) trips it.
+    """
+    import json
+
+    from iommi_lsp.interceptor import DiagnosticInterceptor
+
+    src = (
+        "@permissions.allow\n"
+        "def blank_internal(request):\n"
+        "    return None\n"
+    )
+    f = tmp_path / "views.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+    interceptor = DiagnosticInterceptor(analyzers=[a])
+
+    line = 1
+    start = src.splitlines()[line].index("request")
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {
+            "uri": f.as_uri(),
+            "diagnostics": [_unused_diag(line, start, start + len("request"))],
+        },
+    }
+    out = await interceptor(json.dumps(payload).encode("utf-8"))
+    assert out is not None
+    forwarded = json.loads(out)
+    assert forwarded["params"]["diagnostics"] == []
+
+
 def _invalid_enum_diag(line: int, col_start: int, col_end: int, name: str) -> dict:
     """Mirror ty's ``invalid-assignment`` shape for an Enum tuple member."""
     return {

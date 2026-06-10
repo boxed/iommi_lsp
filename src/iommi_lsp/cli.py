@@ -248,7 +248,7 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
 
     editor_to_ty = _chain_hooks(
         sniffer, matchmaker.on_request, definition_router.on_request,
-        code_action_router.on_request,
+        code_action_router.on_request, interceptor.on_request,
     )
     ty_to_editor = _chain_hooks(
         matchmaker.on_response, definition_router.on_response,

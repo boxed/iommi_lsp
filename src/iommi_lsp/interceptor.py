@@ -31,6 +31,8 @@ from .analyzers.base import Analyzer, CompletionResult, Diagnostic
 _log = log.get("interceptor")
 
 PUBLISH_DIAGNOSTICS = "textDocument/publishDiagnostics"
+DOCUMENT_DIAGNOSTIC = "textDocument/diagnostic"
+WORKSPACE_DIAGNOSTIC = "workspace/diagnostic"
 INITIALIZE = "initialize"
 DID_OPEN = "textDocument/didOpen"
 DID_CHANGE = "textDocument/didChange"
@@ -118,10 +120,53 @@ def _offset_from_lsp_position(text: str, pos: dict) -> int:
 
 
 class DiagnosticInterceptor:
-    """Stateful hook for the ``ty→editor`` direction."""
+    """Filters ty's diagnostics in *both* LSP transport models.
+
+    * **Push** (``textDocument/publishDiagnostics`` notification): ty→editor;
+      handled in :meth:`__call__`.
+    * **Pull** (``textDocument/diagnostic`` / ``workspace/diagnostic``
+      requests, LSP 3.17): the editor asks, ty answers in the *response*.
+      ty advertises the pull provider via dynamic ``client/registerCapability``
+      and then stops pushing entirely, so a pull-capable client (e.g. one
+      that advertises ``textDocument.diagnostic``) never hits the push path
+      and our filter would be bypassed. The response carries no URI — it's
+      in the originating request — so :meth:`on_request` records request
+      id→URI on the editor→ty side and :meth:`__call__` consults it when the
+      matching response comes back.
+    """
 
     def __init__(self, analyzers: Sequence[Analyzer] = ()) -> None:
         self.analyzers: list[Analyzer] = list(analyzers)
+        # Pull-diagnostics request id → document URI (single-document pulls).
+        self._pending_pull: dict[Any, str] = {}
+        # Workspace pull request ids (reports carry their own per-URI).
+        self._pending_workspace_pull: set[Any] = set()
+
+    async def on_request(self, body: bytes) -> bytes | None:
+        """Editor→ty hook: remember pull-diagnostic requests so the matching
+        response (which lacks a URI) can be filtered against the right doc.
+
+        Always forwards the request unchanged.
+        """
+        if not body or body[:1] != b"{":
+            return body
+        try:
+            payload: Any = json.loads(body)
+        except json.JSONDecodeError:
+            return body
+        if not isinstance(payload, dict):
+            return body
+        method = payload.get("method")
+        msg_id = payload.get("id")
+        if msg_id is None:
+            return body
+        if method == DOCUMENT_DIAGNOSTIC:
+            uri = ((payload.get("params") or {}).get("textDocument") or {}).get("uri")
+            if isinstance(uri, str):
+                self._pending_pull[msg_id] = uri
+        elif method == WORKSPACE_DIAGNOSTIC:
+            self._pending_workspace_pull.add(msg_id)
+        return body
 
     async def __call__(self, body: bytes) -> bytes | None:
         # Cheap reject path: only JSON-object frames could be diagnostics.
@@ -135,9 +180,25 @@ class DiagnosticInterceptor:
             _log.warning("could not parse ty→editor frame as JSON; forwarding raw")
             return body
 
-        if not isinstance(payload, dict) or payload.get("method") != PUBLISH_DIAGNOSTICS:
+        if not isinstance(payload, dict):
             return body
 
+        method = payload.get("method")
+        if method == PUBLISH_DIAGNOSTICS:
+            return self._handle_publish(payload, body)
+
+        # Responses carry an id and no method. Match against the pull-request
+        # bookkeeping; everything else (completion/definition/etc. responses,
+        # server→editor requests) falls straight through.
+        msg_id = payload.get("id")
+        if method is None and msg_id is not None:
+            if msg_id in self._pending_pull:
+                return self._handle_pull_response(payload, body, msg_id)
+            if msg_id in self._pending_workspace_pull:
+                return self._handle_workspace_pull_response(payload, body, msg_id)
+        return body
+
+    def _handle_publish(self, payload: dict, body: bytes) -> bytes | None:
         params = payload.get("params") or {}
         uri = params.get("uri", "")
         diagnostics: list[Diagnostic] = list(params.get("diagnostics") or [])
@@ -160,6 +221,62 @@ class DiagnosticInterceptor:
         params["diagnostics"] = kept + added
         payload["params"] = params
         return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    def _handle_pull_response(self, payload: dict, body: bytes, msg_id: Any) -> bytes | None:
+        uri = self._pending_pull.pop(msg_id, None)
+        result = payload.get("result")
+        # Error responses / cancellations have no ``result`` dict — the id is
+        # resolved, nothing to filter.
+        if uri is None or not isinstance(result, dict):
+            return body
+        if not self._filter_full_report(uri, result):
+            return body
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    def _handle_workspace_pull_response(self, payload: dict, body: bytes, msg_id: Any) -> bytes | None:
+        self._pending_workspace_pull.discard(msg_id)
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            return body
+        items = result.get("items")
+        if not isinstance(items, list):
+            return body
+        changed = False
+        for report in items:
+            # Each WorkspaceDocumentDiagnosticReport carries its own URI.
+            if not isinstance(report, dict):
+                continue
+            rep_uri = report.get("uri")
+            if isinstance(rep_uri, str) and self._filter_full_report(rep_uri, report):
+                changed = True
+        if not changed:
+            return body
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    def _filter_full_report(self, uri: str, report: dict) -> bool:
+        """Filter a (Related)FullDocumentDiagnosticReport in place. Returns
+        whether anything changed. ``unchanged`` reports have no ``items`` and
+        are left alone."""
+        changed = False
+        items = report.get("items")
+        if isinstance(items, list):
+            kept = self._filter(uri, items)
+            added = self._added(uri)
+            if len(kept) != len(items) or added:
+                report["items"] = kept + added
+                changed = True
+            _log.debug(
+                "pull diagnostic uri=%s in=%d kept=%d dropped=%d added=%d",
+                uri, len(items), len(kept), len(items) - len(kept), len(added),
+            )
+        # ``relatedDocuments`` maps other URIs to their own reports.
+        related = report.get("relatedDocuments")
+        if isinstance(related, dict):
+            for rel_uri, rel_report in related.items():
+                if isinstance(rel_uri, str) and isinstance(rel_report, dict):
+                    if self._filter_full_report(rel_uri, rel_report):
+                        changed = True
+        return changed
 
     def _filter(self, uri: str, diagnostics: list[Diagnostic]) -> list[Diagnostic]:
         if not self.analyzers:
