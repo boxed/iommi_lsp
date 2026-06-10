@@ -73,6 +73,35 @@ DATE_FIELD_NAMES: frozenset[str] = frozenset({
 })
 
 
+# Django HTTP response classes. They all inherit ``__setitem__`` from
+# ``HttpResponseBase``, which stringifies whatever value it's handed
+# (``_convert_to_charset`` does ``str(value)`` for non-str/bytes). So
+# ``response[header] = value`` is runtime-valid for any value type, but
+# django-stubs types the setter as ``(str, str | bytes | int)`` — ty then
+# flags ``response['X'] = guess_type(p)[0]`` (a ``str | None``) and similar
+# as ``invalid-assignment``. We suppress those when the receiver's type is
+# one of these.
+DJANGO_RESPONSE_TYPE_NAMES: frozenset[str] = frozenset({
+    "HttpResponseBase",
+    "HttpResponse",
+    "StreamingHttpResponse",
+    "FileResponse",
+    "JsonResponse",
+    "HttpResponseRedirect",
+    "HttpResponsePermanentRedirect",
+    "HttpResponseRedirectBase",
+    "HttpResponseNotModified",
+    "HttpResponseBadRequest",
+    "HttpResponseNotFound",
+    "HttpResponseForbidden",
+    "HttpResponseNotAllowed",
+    "HttpResponseGone",
+    "HttpResponseServerError",
+    "TemplateResponse",
+    "SimpleTemplateResponse",
+})
+
+
 # Aggregate of attributes that always exist on a Django model regardless
 # of its declarations. Reverse relations and FK-id accessors are
 # index-driven and not in this set.

@@ -40,6 +40,7 @@ from .index import (
     update_scrapes,
 )
 from .magic import (
+    DJANGO_RESPONSE_TYPE_NAMES,
     FIELD_UNION_REL_NAMES,
     FK_LIKE_FIELD_NAMES,
     ORM_LOOKUP_NAMES,
@@ -885,6 +886,15 @@ class DjangoAnalyzer:
                 _log.exception("decorator-typevar check crashed; keeping the diagnostic")
                 return False
         if (
+            _is_response_subscript_assignment_message(diagnostic)
+            and self.config.is_rule_enabled("response_header_assignment")
+        ):
+            try:
+                return self._is_response_subscript_assignment(uri, diagnostic)
+            except Exception:
+                _log.exception("response-header-assignment check crashed; keeping the diagnostic")
+                return False
+        if (
             _is_field_union_attribute(diagnostic)
             and self.config.is_rule_enabled("field_union")
         ):
@@ -975,6 +985,29 @@ class DjangoAnalyzer:
         start = (diagnostic.get("range") or {}).get("start") or {}
         line_no = int(start.get("line", 0)) + 1
         return _decorator_on_line(parsed.tree, line_no)
+
+    def _is_response_subscript_assignment(self, uri: str, diagnostic: Diagnostic) -> bool:
+        """Suppress ty's ``invalid-assignment`` for ``response[header] = value``.
+
+        ``HttpResponseBase.__setitem__`` stringifies whatever it's given
+        (``_convert_to_charset`` falls back to ``str(value)`` for anything
+        that isn't ``bytes``/``str``), so any value type is runtime-valid.
+        django-stubs nonetheless types the setter as ``(str, str | bytes |
+        int)`` and ty flags e.g. ``response['Content-Type'] =
+        guess_type(p)[0]`` (a ``str | None``). The message already tells us
+        the receiver is a Django response type (verified in
+        :func:`_is_response_subscript_assignment_message`); here we confirm
+        the flagged target really is a subscript-assignment so we don't
+        swallow an unrelated ``invalid-assignment`` that happens to mention
+        a response type.
+        """
+        path = _uri_to_path(uri)
+        if path is None:
+            return False
+        parsed = self._parse(uri, path)
+        if parsed is None:
+            return False
+        return _subscript_store_target_at(parsed.tree, diagnostic.get("range") or {})
 
     def _is_first_request_param(self, uri: str, diagnostic: Diagnostic) -> bool:
         path = _uri_to_path(uri)
@@ -2043,6 +2076,53 @@ def _decorator_on_line(tree: ast.Module, line_no: int) -> bool:
         for dec in getattr(node, "decorator_list", None) or ():
             if getattr(dec, "lineno", None) == line_no:
                 return True
+    return False
+
+
+_RESPONSE_OBJECT_TYPE_RE = re.compile(r"on object of type `([^`]+)`")
+
+
+def _is_response_subscript_assignment_message(diagnostic: Diagnostic) -> bool:
+    """Match ty's ``invalid-assignment`` for a subscript assignment whose
+    receiver is a Django HTTP response.
+
+    ty's message shape: ``Invalid subscript assignment with key of type
+    `…` and value of type `…` on object of type `HttpResponse```. We
+    anchor on the ``invalid-assignment`` code, the ``subscript
+    assignment`` phrasing, and a receiver type drawn from
+    :data:`DJANGO_RESPONSE_TYPE_NAMES`, then verify the AST shape in
+    :meth:`DjangoAnalyzer._is_response_subscript_assignment`.
+    """
+    code = diagnostic.get("code")
+    code_value = code if isinstance(code, str) else (
+        code.get("value") if isinstance(code, dict) else None
+    )
+    if code_value != "invalid-assignment":
+        return False
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return False
+    if "subscript assignment" not in message:
+        return False
+    match = _RESPONSE_OBJECT_TYPE_RE.search(message)
+    if match is None:
+        return False
+    return match.group(1) in DJANGO_RESPONSE_TYPE_NAMES
+
+
+def _subscript_store_target_at(tree: ast.Module, range_: dict) -> bool:
+    """Whether an ``ast.Subscript`` in ``Store`` context starts at the LSP
+    range's start position — i.e. the flagged node is ``x[...] = ...``."""
+    start = range_.get("start") or {}
+    s_line = int(start.get("line", 0)) + 1
+    s_col = int(start.get("character", 0))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Subscript):
+            continue
+        if not isinstance(node.ctx, ast.Store):
+            continue
+        if node.lineno == s_line and node.col_offset == s_col:
+            return True
     return False
 
 

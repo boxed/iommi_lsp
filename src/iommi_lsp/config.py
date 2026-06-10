@@ -56,6 +56,7 @@ RULE_GROUPS: dict[str, frozenset[str]] = {
     "relation_field_assignment": frozenset(),  # drops ty's invalid-assignment on ForeignKey/OneToOneField/ManyToManyField field declarations
     "field_union": frozenset(),            # drops ty's unresolved-attribute on the ForeignObjectRel arm of _meta.get_fields()'s Field|ForeignObjectRel union
     "decorator_typevar": frozenset(),      # drops ty's invalid-argument-type ("Expected TypeVar") on require_POST/require_GET-style passthrough decorators
+    "response_header_assignment": frozenset(),  # drops ty's invalid-assignment on `response[header] = value` (HttpResponseBase.__setitem__ stringifies any value)
 }
 
 

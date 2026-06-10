@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Suppress ty's `invalid-assignment` on `response[header] = value` (HTTP response subscript assignment)
 - Another fallback to handle `instance.id` and similar django-isms
 - Model FK assignment no longer warns about mismatched types
 - `annotate()` support
