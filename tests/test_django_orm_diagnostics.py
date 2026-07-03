@@ -812,11 +812,11 @@ def test_filter_without_matching_alias_still_flagged(
     assert any("bogus" in d["message"] for d in diags)
 
 
-def test_alias_only_visible_in_same_expression(
+def test_alias_visible_across_statements_via_local_variable(
     analyzer_blog: DjangoAnalyzer, tmp_path: Path,
 ):
-    """An alias defined upstream on a different statement is not picked
-    up — same-expression scope only (cheap, no flow analysis)."""
+    """An alias declared on one statement is picked up by a filter on the
+    next, following the local-variable assignment flow."""
     src = (
         "from django.db.models import Count\n"
         "from blog.models import Author\n"
@@ -825,10 +825,54 @@ def test_alias_only_visible_in_same_expression(
     )
     uri = _write(tmp_path, src)
     diags = analyzer_blog.additional_diagnostics(uri)
-    # qs.filter resolves to Author, then `n` isn't a real field → flagged.
-    # This documents current behaviour; the FUTURE_PLANS note explicitly
-    # scopes the first cut to same-expression.
-    assert any("'n'" in d["message"] for d in diags)
+    assert diags == []
+
+
+def test_alias_visible_across_reassignment_of_same_variable(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path,
+):
+    """The ``qs = qs.annotate(...)`` / ``qs = qs.filter(...)`` reassignment
+    pattern (as in dryft economics) carries the alias forward."""
+    src = (
+        "from django.db.models import Count\n"
+        "from blog.models import Author\n"
+        "qs = Author.objects.all()\n"
+        "qs = qs.annotate(n=Count('articles'))\n"
+        "qs = qs.filter(n__isnull=False)\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_blog.additional_diagnostics(uri)
+    assert diags == []
+
+
+def test_alias_across_statements_order_by(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path,
+):
+    """Field-path methods (order_by) also see aliases carried by a local."""
+    src = (
+        "from django.db.models import Count\n"
+        "from blog.models import Author\n"
+        "qs = Author.objects.annotate(n=Count('articles'))\n"
+        "qs.order_by('-n')\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_blog.additional_diagnostics(uri)
+    assert diags == []
+
+
+def test_bogus_lookup_still_flagged_with_local_alias(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path,
+):
+    """Flow-based alias resolution doesn't suppress genuinely bad lookups."""
+    src = (
+        "from django.db.models import Count\n"
+        "from blog.models import Author\n"
+        "qs = Author.objects.annotate(n=Count('articles'))\n"
+        "qs.filter(bogus=5)\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_blog.additional_diagnostics(uri)
+    assert any("bogus" in d["message"] for d in diags)
 
 
 def test_get_user_model_chain_validates_against_user(

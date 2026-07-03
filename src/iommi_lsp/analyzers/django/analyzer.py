@@ -1404,10 +1404,16 @@ class DjangoAnalyzer:
             if model is None:
                 continue
             # Upstream ``annotate(alias=…)`` / ``aggregate(alias=…)`` /
-            # ``alias(alias=…)`` declarations in the same expression
-            # chain — those alias names are valid leaf lookups for the
-            # filter/order_by/etc. that consumes them.
-            aliases = _collect_chain_aliases(node)
+            # ``alias(alias=…)`` declarations — those alias names are
+            # valid leaf lookups for the filter/order_by/etc. that
+            # consumes them. ``_collect_chain_aliases`` handles the same
+            # expression chain (``qs.annotate(x=…).filter(x=1)``);
+            # ``_aliases_from_iter`` additionally follows the receiver
+            # through local-variable assignments (``qs = qs.annotate(x=…)``
+            # on one line, ``qs.filter(x=1)`` on the next).
+            aliases = _collect_chain_aliases(node) | self._aliases_from_iter(
+                node.func.value, tree=parsed.tree,
+            )
             if method in _LOOKUP_METHODS:
                 # `.filter(name__icontains=…)` — direct kwargs.
                 yield from self._validate_kwargs(
