@@ -61,6 +61,61 @@ FK_LIKE_FIELD_NAMES: frozenset[str] = frozenset({
 })
 
 
+# Django scalar (non-relation) field types → the Python type their
+# descriptor yields at instance-access time, spelled the way ty prints it
+# in an ``invalid-assignment`` message (unqualified: ``date``, ``Decimal``,
+# ``bytes`` — not ``datetime.date`` etc.).
+#
+# Django installs a descriptor so ``instance.<field>`` returns this Python
+# value, but a static reader sees only the ``<Field>`` class object on the
+# class body. So an annotated declaration like ``name: str = CharField()``
+# — or any setup that requires ``name`` to be ``str`` — makes ty emit
+# ``Object of type `CharField` is not assignable to `str```. Because the
+# mapping is exact we can suppress that while still keeping a genuine
+# mismatch such as ``count: str = IntegerField()`` (``int`` ≠ ``str``).
+#
+# Relation fields (ForeignKey/…) are handled separately — their descriptor
+# yields a *model instance*, not a scalar — see RELATION_FIELD_NAMES and
+# the ``relation_field_assignment`` rule. File/Image fields are excluded:
+# their descriptor yields a ``FieldFile``, not a plain scalar.
+SCALAR_FIELD_PYTHON_TYPES: dict[str, str] = {
+    # str
+    "CharField": "str",
+    "TextField": "str",
+    "SlugField": "str",
+    "EmailField": "str",
+    "URLField": "str",
+    "GenericIPAddressField": "str",
+    "IPAddressField": "str",
+    "FilePathField": "str",
+    "CommaSeparatedIntegerField": "str",
+    # int
+    "IntegerField": "int",
+    "SmallIntegerField": "int",
+    "BigIntegerField": "int",
+    "PositiveIntegerField": "int",
+    "PositiveSmallIntegerField": "int",
+    "PositiveBigIntegerField": "int",
+    "AutoField": "int",
+    "SmallAutoField": "int",
+    "BigAutoField": "int",
+    # float
+    "FloatField": "float",
+    # bool
+    "BooleanField": "bool",
+    # Decimal
+    "DecimalField": "Decimal",
+    # datetime family
+    "DateField": "date",
+    "DateTimeField": "datetime",
+    "TimeField": "time",
+    "DurationField": "timedelta",
+    # misc
+    "BinaryField": "bytes",
+    "UUIDField": "UUID",
+}
+
+
 # Date / time field types — declarations like these gain auto-generated
 # ``get_next_by_<name>()`` / ``get_previous_by_<name>()`` methods on the
 # concrete model. (Django adds them in :class:`ModelBase` whenever a

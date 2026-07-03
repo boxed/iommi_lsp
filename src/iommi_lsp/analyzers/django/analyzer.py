@@ -45,6 +45,7 @@ from .magic import (
     FK_LIKE_FIELD_NAMES,
     ORM_LOOKUP_NAMES,
     RELATION_FIELD_NAMES,
+    SCALAR_FIELD_PYTHON_TYPES,
 )
 
 if TYPE_CHECKING:
@@ -877,6 +878,15 @@ class DjangoAnalyzer:
                 _log.exception("relation-field-assignment check crashed; keeping the diagnostic")
                 return False
         if (
+            _is_scalar_field_assignment_message(diagnostic)
+            and self.config.is_rule_enabled("scalar_field_assignment")
+        ):
+            try:
+                return self._is_scalar_field_assignment(uri, diagnostic)
+            except Exception:
+                _log.exception("scalar-field-assignment check crashed; keeping the diagnostic")
+                return False
+        if (
             _is_decorator_typevar_argument(diagnostic)
             and self.config.is_rule_enabled("decorator_typevar")
         ):
@@ -974,6 +984,30 @@ class DjangoAnalyzer:
         if call is None:
             return False
         return _call_is_relation_field(call)
+
+    def _is_scalar_field_assignment(self, uri: str, diagnostic: Diagnostic) -> bool:
+        """Suppress ty's ``invalid-assignment`` for a scalar Django field
+        declaration like ``name: str = CharField()``.
+
+        Django installs a descriptor so ``instance.name`` returns ``str``,
+        but ty sees a ``CharField`` on the class body and complains it isn't
+        assignable to the declared/required type. The message-shape check in
+        :func:`_is_scalar_field_assignment_message` has already confirmed the
+        RHS type name maps to the declared target type (so a real mismatch
+        like ``count: str = IntegerField()`` is left alone); here we verify
+        the flagged range really is a scalar-field constructor call so we
+        don't swallow an unrelated ``invalid-assignment``.
+        """
+        path = _uri_to_path(uri)
+        if path is None:
+            return False
+        parsed = self._parse(uri, path)
+        if parsed is None:
+            return False
+        call = _find_call_at(parsed.tree, diagnostic.get("range") or {})
+        if call is None:
+            return False
+        return _call_is_scalar_field(call)
 
     def _is_decorator_typevar(self, uri: str, diagnostic: Diagnostic) -> bool:
         path = _uri_to_path(uri)
@@ -2040,6 +2074,68 @@ def _call_is_relation_field(call: ast.Call) -> bool:
         return func.id in RELATION_FIELD_NAMES
     if isinstance(func, ast.Attribute):
         return func.attr in RELATION_FIELD_NAMES
+    return False
+
+
+# ``Object of type `CharField` is not assignable to `str``` — the field
+# class name may carry django-stubs generic params (``CharField[Unknown,
+# Unknown]``), which we drop, and the target is captured whole (it may be a
+# union like ``str | None`` or ``int | float``).
+_SCALAR_FIELD_ASSIGN_RE = re.compile(
+    r"Object of type `([A-Za-z_][A-Za-z0-9_]*)(?:\[[^`]*\])?` "
+    r"is not assignable to `([^`]+)`"
+)
+
+
+def _acceptable_target_types(base: str) -> frozenset[str]:
+    """The ty target-type spellings a *base* scalar type is allowed to face.
+
+    Always the bare type and its ``| None`` (nullable) union. ``float`` also
+    admits ``int | float`` because the PEP 484 numeric tower means annotating
+    ``float`` accepts ``int``, so ty widens the declared type accordingly.
+    """
+    forms = {base, f"{base} | None"}
+    if base == "float":
+        forms |= {"int | float", "int | float | None"}
+    return frozenset(forms)
+
+
+def _is_scalar_field_assignment_message(diagnostic: Diagnostic) -> bool:
+    """Match ty's ``invalid-assignment`` whose RHS is a scalar Django field
+    assigned to a target that matches that field's Python type.
+
+    The RHS field name must be a known scalar field and the declared target
+    type must be that field's mapped Python type (optionally nullable, plus
+    the numeric-tower widening for ``float``). A mismatch — ``count: str =
+    IntegerField()`` — fails the target check and the diagnostic is kept. The
+    AST shape is verified in :meth:`DjangoAnalyzer._is_scalar_field_assignment`.
+    """
+    code = diagnostic.get("code")
+    code_value = code if isinstance(code, str) else (
+        code.get("value") if isinstance(code, dict) else None
+    )
+    if code_value != "invalid-assignment":
+        return False
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return False
+    m = _SCALAR_FIELD_ASSIGN_RE.search(message)
+    if m is None:
+        return False
+    field_name, target = m.group(1), m.group(2)
+    base = SCALAR_FIELD_PYTHON_TYPES.get(field_name)
+    if base is None:
+        return False
+    return target in _acceptable_target_types(base)
+
+
+def _call_is_scalar_field(call: ast.Call) -> bool:
+    """Whether *call* is ``CharField(...)`` / ``models.IntegerField(...)`` etc."""
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id in SCALAR_FIELD_PYTHON_TYPES
+    if isinstance(func, ast.Attribute):
+        return func.attr in SCALAR_FIELD_PYTHON_TYPES
     return False
 
 

@@ -360,9 +360,10 @@ manager = ["mongo", "search"]            # treat these as Manager-like attrs
 
 Recognised rule groups: `manager`, `meta`, `pk`, `exception`, `fk_id`,
 `reverse`, `generated`, `orm_lookup`, `unused_request_param`,
-`choices_enum`, `f_operator`, `annotate`. Unknown groups in
-`disabled_rules` are ignored with a stderr warning rather than silently
-breaking the filter.
+`choices_enum`, `f_operator`, `annotate`, `relation_field_assignment`,
+`scalar_field_assignment`, `field_union`, `decorator_typevar`,
+`response_header_assignment`. Unknown groups in `disabled_rules` are
+ignored with a stderr warning rather than silently breaking the filter.
 
 A missing or malformed `pyproject.toml` falls back to defaults; the
 proxy never crashes on a bad config.

@@ -155,3 +155,28 @@ Abstract-base fields propagate to concrete subclasses. So
 `username` / etc., and your own `class Timestamped(models.Model):
 class Meta: abstract = True` lets a `Book(Timestamped)` filter on
 `created` without a false positive.
+
+## Field-declaration assignment diagnostics
+
+Django installs a descriptor for every model field, so `instance.<field>`
+returns a Python value, not the `Field` object sitting on the class body.
+ty doesn't model that descriptor, so a *typed* field declaration reads to
+it as an `invalid-assignment`. Two rules subtract that noise:
+
+* `relation_field_assignment` — `project: Project = ForeignKey(Project,
+  …)`. The descriptor yields a related-model instance; ty complains
+  `ForeignKey[…]` isn't a `Project`. We suppress whenever the flagged RHS
+  is a `ForeignKey`/`OneToOneField`/`ManyToManyField` call.
+* `scalar_field_assignment` — `name: str = CharField()`, `count: int =
+  IntegerField()`, … The descriptor yields a scalar. Here the match is
+  **exact**: `magic.SCALAR_FIELD_PYTHON_TYPES` maps each field type to the
+  Python type ty prints (`CharField`→`str`, `FloatField`→`float`, …), and
+  we only suppress when ty's declared target *is* that type — allowing its
+  nullable `T | None` form and the `int | float` numeric-tower widening for
+  `float`. A genuine mismatch like `count: str = IntegerField()` fails the
+  target check and survives. django-stubs' generic params
+  (`CharField[Unknown, Unknown]`) are stripped before the lookup.
+
+Both anchor on the message shape first, then re-parse and confirm the
+flagged range really is the matching field constructor before dropping the
+diagnostic.

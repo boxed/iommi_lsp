@@ -2339,3 +2339,181 @@ def test_relation_field_rule_disabled_keeps_diagnostic(tmp_path: Path):
     col_end = len(line_text)
     diag = _relation_field_diag(line, col_start, col_end, "ForeignKey")
     assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+# -- scalar field declaration suppression ------------------------------------
+
+
+def _scalar_field_diag(line: int, col_start: int, col_end: int, type_name: str, target: str) -> dict:
+    """Mirror ty's ``invalid-assignment`` for ``f: target = ScalarField(...)``."""
+    return {
+        "code": "invalid-assignment",
+        "message": f"Object of type `{type_name}` is not assignable to `{target}`",
+        "range": {
+            "start": {"line": line, "character": col_start},
+            "end": {"line": line, "character": col_end},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+
+
+@pytest.mark.parametrize(
+    "field_type, target",
+    [
+        ("CharField", "str"),
+        ("TextField", "str"),
+        ("SlugField", "str"),
+        ("EmailField", "str"),
+        ("IntegerField", "int"),
+        ("BigIntegerField", "int"),
+        ("PositiveSmallIntegerField", "int"),
+        ("AutoField", "int"),
+        ("FloatField", "float"),
+        ("FloatField", "int | float"),  # PEP 484 numeric tower widening
+        ("BooleanField", "bool"),
+        ("DecimalField", "Decimal"),
+        ("DateField", "date"),
+        ("DateTimeField", "datetime"),
+        ("DurationField", "timedelta"),
+        ("BinaryField", "bytes"),
+        ("UUIDField", "UUID"),
+        # Nullable declarations — ty spells the target as ``T | None``.
+        ("CharField", "str | None"),
+        ("IntegerField", "int | None"),
+        ("FloatField", "int | float | None"),
+    ],
+)
+def test_scalar_field_assignment_diagnostic_is_dropped(tmp_path: Path, field_type: str, target: str):
+    src = (
+        "from django.db import models\n"
+        "\n"
+        "class Thing(models.Model):\n"
+        f"    value: object = models.{field_type}()\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    line_text = src.splitlines()[line]
+    col_start = line_text.index(f"models.{field_type}")
+    col_end = len(line_text)
+    diag = _scalar_field_diag(line, col_start, col_end, field_type, target)
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_scalar_field_assignment_with_generic_params_is_dropped(tmp_path: Path):
+    """django-stubs renders the type as ``CharField[Unknown, Unknown]``."""
+    src = (
+        "from django.db import models\n"
+        "\n"
+        "class Thing(models.Model):\n"
+        "    name: str = models.CharField(max_length=100)\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    line_text = src.splitlines()[line]
+    col_start = line_text.index("models.CharField")
+    col_end = len(line_text)
+    diag = _scalar_field_diag(line, col_start, col_end, "CharField[Unknown, Unknown]", "str")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_scalar_field_assignment_bare_import_is_dropped(tmp_path: Path):
+    """``from django.db.models import CharField`` — bare ``Name`` call."""
+    src = (
+        "from django.db import models\n"
+        "from django.db.models import CharField\n"
+        "\n"
+        "class Thing(models.Model):\n"
+        "    name: str = CharField(max_length=100)\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 4
+    line_text = src.splitlines()[line]
+    col_start = line_text.index("CharField(")
+    col_end = len(line_text)
+    diag = _scalar_field_diag(line, col_start, col_end, "CharField", "str")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_scalar_field_type_mismatch_is_kept(tmp_path: Path):
+    """``count: str = IntegerField()`` — IntegerField yields ``int``, not
+    ``str``, so this is a genuine bug and must survive."""
+    src = (
+        "from django.db import models\n"
+        "\n"
+        "class Thing(models.Model):\n"
+        "    count: str = models.IntegerField()\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    line_text = src.splitlines()[line]
+    col_start = line_text.index("models.IntegerField")
+    col_end = len(line_text)
+    diag = _scalar_field_diag(line, col_start, col_end, "IntegerField", "str")
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_scalar_field_assignment_unknown_field_is_kept(tmp_path: Path):
+    """A non-field RHS with the same message shape is not ours."""
+    src = (
+        "class Plain:\n"
+        "    x: int = SomeThing()\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 1
+    line_text = src.splitlines()[line]
+    col_start = line_text.index("SomeThing()")
+    col_end = len(line_text)
+    diag = _scalar_field_diag(line, col_start, col_end, "SomeThing", "int")
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_scalar_field_rule_disabled_keeps_diagnostic(tmp_path: Path):
+    from iommi_lsp.config import Config
+
+    src = (
+        "from django.db import models\n"
+        "\n"
+        "class Thing(models.Model):\n"
+        "    name: str = models.CharField(max_length=100)\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(
+        workspace_root=CORPUS / "basic_django",
+        config=Config(disabled_rules=frozenset({"scalar_field_assignment"})),
+    )
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    line_text = src.splitlines()[line]
+    col_start = line_text.index("models.CharField")
+    col_end = len(line_text)
+    diag = _scalar_field_diag(line, col_start, col_end, "CharField", "str")
+    assert a.is_false_positive(f.as_uri(), diag) is False
