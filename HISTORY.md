@@ -5,6 +5,7 @@
 - Attribute access, assignment and arithmetic *through* a Django field no longer warn (the descriptor is invisible to ty)
 - "Code is unreachable" no longer cascades from a guard that narrows on a model field
 - Unused-name hints dropped on pytest fixtures/test modules, stub bodies, `*args`/`**kwargs`, and names bound by sequence unpacking
+- `annotate()` aliases survive a `values()` / `values_list()` in the chain
 - Attribute access on a function object no longer warns (decorators that return a wrapper — `sync_to_async().func`, `shared_task().delay`)
 - "Code is unreachable" also suppressed behind a `None` check on a model-typed name
 - `id` accepted in ORM lookups on implicit-PK models, and reverse relations accepted by their query name (`job`, not just `job_set`)

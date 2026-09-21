@@ -89,6 +89,16 @@ _FIELD_PATH_METHODS = frozenset({
     "select_related", "prefetch_related",
 })
 
+# Methods that keep an upstream ``annotate``/``alias`` name usable even
+# though they change what the queryset yields. ``values()`` /
+# ``values_list()`` produce dicts / tuples rather than instances — so they
+# don't belong in the set above — but an alias declared before them is
+# still a valid name inside them and in everything chained after
+# (``qs.annotate(total=…).values('total').order_by('total')``).
+_ALIAS_PRESERVING_METHODS = _QUERY_METHODS_RETURNING_QUERYSET | frozenset({
+    "values", "values_list",
+})
+
 # Methods whose kwarg *names* are user-defined aliases (not model fields)
 # but whose *values* commonly contain ``F('path')`` / ``Count('path')``
 # expressions — so we still want to walk the call to validate those.
@@ -932,7 +942,7 @@ class DjangoAnalyzer:
             return frozenset()
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
             method = value.func.attr
-            if method not in _QUERY_METHODS_RETURNING_QUERYSET:
+            if method not in _ALIAS_PRESERVING_METHODS:
                 return frozenset()
             aliases: set[str] = set()
             if method in _AGGREGATE_METHODS:

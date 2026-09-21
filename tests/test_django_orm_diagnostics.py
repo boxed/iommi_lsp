@@ -922,3 +922,50 @@ def test_alias_method_alias_function(
     uri = _write(tmp_path, src)
     diags = analyzer_blog.additional_diagnostics(uri)
     assert diags == []
+
+
+def test_alias_survives_values_in_the_same_chain(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path,
+):
+    """``values()`` yields dicts, but an upstream alias is still a name."""
+    src = (
+        "from django.db.models import Count, Sum\n"
+        "from blog.models import Author\n"
+        "(\n"
+        "    Author.objects.annotate(n=Count('articles'))\n"
+        "    .values('name')\n"
+        "    .annotate(total=Sum('n'))\n"
+        "    .order_by('total')\n"
+        ")\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_blog.additional_diagnostics(uri) == []
+
+
+def test_alias_survives_values_across_statements(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path,
+):
+    """The dryft economics shape: annotate on one statement, ``values`` on
+    the next, and the alias used inside an aggregate after that."""
+    src = (
+        "from django.db.models import Count, Sum\n"
+        "from blog.models import Author\n"
+        "qs = Author.objects.annotate(n=Count('articles'))\n"
+        "qs.values('name', 'n').annotate(total=Sum('n')).order_by('n')\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_blog.additional_diagnostics(uri) == []
+
+
+def test_bogus_name_after_values_is_still_flagged(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path,
+):
+    src = (
+        "from django.db.models import Count, Sum\n"
+        "from blog.models import Author\n"
+        "qs = Author.objects.annotate(n=Count('articles'))\n"
+        "qs.values('name').annotate(total=Sum('bogus'))\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_blog.additional_diagnostics(uri)
+    assert any("bogus" in d["message"] for d in diags)
