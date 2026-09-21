@@ -50,6 +50,8 @@ RULE_GROUPS: dict[str, frozenset[str]] = {
     "generated": frozenset(),              # dynamic — see ModelInfo.generated_method_names
     "orm_lookup": frozenset(),             # dynamic — see DjangoAnalyzer.additional_diagnostics
     "unused_request_param": frozenset(),   # drops ty's "`request` is unused" hint when it's the first param
+    "unused_test_param": frozenset(),      # drops ty's "`x` is unused" hint on a parameter of a test function, a pytest fixture, or any callable in a test module
+    "unused_param_in_stub": frozenset(),   # drops ty's "`x` is unused" hint on a parameter of a stub body (``...``, ``pass``, ``raise NotImplementedError``)
     "choices_enum": frozenset(),           # drops ty's invalid-assignment on IntegerChoices/TextChoices tuple members
     "f_operator": frozenset(),             # drops ty's unsupported-operator on F()/Combinable arithmetic
     "annotate": frozenset(),               # drops ty's unresolved-attribute on annotate()/alias() aliases
@@ -58,6 +60,12 @@ RULE_GROUPS: dict[str, frozenset[str]] = {
     "field_union": frozenset(),            # drops ty's unresolved-attribute on the ForeignObjectRel arm of _meta.get_fields()'s Field|ForeignObjectRel union
     "decorator_typevar": frozenset(),      # drops ty's invalid-argument-type ("Expected TypeVar") on require_POST/require_GET-style passthrough decorators
     "response_header_assignment": frozenset(),  # drops ty's invalid-assignment on `response[header] = value` (HttpResponseBase.__setitem__ stringifies any value)
+    "relation_field_attribute": frozenset(),  # drops ty's unresolved-attribute when the receiver is a ForeignKey/OneToOneField/ManyToManyField (the descriptor yields the related instance)
+    "field_attribute_assignment": frozenset(),  # drops ty's invalid-assignment onto an instance attribute whose declared type is a model field
+    "field_operator": frozenset(),         # drops ty's unsupported-operator when an operand's type is a model field (the descriptor yields the Python value)
+    "field_argument_type": frozenset(),    # drops ty's invalid-argument-type when the argument's type is a model field
+    "splat_argument": frozenset(),         # drops ty's argument-shape diagnostics (invalid-argument-type, no-matching-overload, …) for a call that passes `**some_dict`
+    "field_narrowing_unreachable": frozenset(),  # drops ty's "Code is unreachable" when an earlier guard narrows on a model-field attribute (a field class object is never None / always truthy to ty)
 }
 
 
@@ -66,6 +74,13 @@ class Config:
     enabled: bool = True
     disabled_rules: frozenset[str] = field(default_factory=frozenset)
     extra_magic_attrs: dict[str, frozenset[str]] = field(default_factory=dict)
+    # ``[tool.ty.analysis.names-to-types]`` — not our section, but ty
+    # reads it to type unannotated names by convention (``project`` is a
+    # ``Project``, ``user`` a ``User``, …). Reading it too lets our AST
+    # resolvers see the same types ty does in test files and other
+    # un-annotated code. Name → the qualnames it maps to (``A|B`` unions
+    # keep both arms).
+    names_to_types: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def is_rule_enabled(self, rule: str) -> bool:
         return self.enabled and rule not in self.disabled_rules
@@ -96,14 +111,44 @@ def load(workspace_root: Path) -> Config:
         _log.warning("could not parse %s: %s; using defaults", pyproject, e)
         return DEFAULT
 
+    names_to_types = _read_names_to_types(data, source=str(pyproject))
+
     section = (data.get("tool") or {}).get("iommi_lsp")
     if not isinstance(section, dict):
-        return DEFAULT
+        if not names_to_types:
+            return DEFAULT
+        return Config(names_to_types=names_to_types)
 
-    return _from_dict(section, source=str(pyproject))
+    return _from_dict(
+        section, source=str(pyproject), names_to_types=names_to_types,
+    )
 
 
-def _from_dict(section: dict, *, source: str) -> Config:
+def _read_names_to_types(data: dict, *, source: str) -> dict[str, tuple[str, ...]]:
+    """Parse ``[tool.ty.analysis.names-to-types]`` (a ty-semantic feature)."""
+    analysis = ((data.get("tool") or {}).get("ty") or {}).get("analysis")
+    if not isinstance(analysis, dict):
+        return {}
+    raw = analysis.get("names-to-types")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, tuple[str, ...]] = {}
+    for name, value in raw.items():
+        if not isinstance(value, str):
+            _log.warning("%s: names-to-types.%s must be a string", source, name)
+            continue
+        arms = tuple(a.strip() for a in value.split("|") if a.strip())
+        if arms:
+            out[name] = arms
+    return out
+
+
+def _from_dict(
+    section: dict,
+    *,
+    source: str,
+    names_to_types: dict[str, tuple[str, ...]] | None = None,
+) -> Config:
     enabled = bool(section.get("enabled", True))
 
     raw_disabled = section.get("disabled_rules") or []
@@ -147,4 +192,5 @@ def _from_dict(section: dict, *, source: str) -> Config:
         enabled=enabled,
         disabled_rules=frozenset(disabled),
         extra_magic_attrs=extra,
+        names_to_types=names_to_types or {},
     )

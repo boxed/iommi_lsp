@@ -182,3 +182,21 @@ ORM_LOOKUP_NAMES: frozenset[str] = frozenset({
     "overlap", "contained_by", "contains_any", "has_key", "has_keys",
     "has_any_keys",
 })
+
+
+def is_model_field_type_name(name: str) -> bool:
+    """True when *name* looks like a Django model-field class.
+
+    Recognises the built-in field classes by name and project-specific
+    subclasses (``MoneyField``, ``OrganizationNumberField``, …) by their
+    ``…Field`` suffix. Bare ``Field`` is excluded — it's the abstract
+    base, and unrelated libraries (iommi, ``django.forms``) have their own
+    class by that name, so suppressing on it would hide real errors.
+
+    *name* may carry generics (``ForeignKey[Unknown, Unknown]``) or a
+    module prefix; both are stripped before the check.
+    """
+    base = name.split("[", 1)[0].rsplit(".", 1)[-1].strip()
+    if base in RELATION_FIELD_NAMES or base in SCALAR_FIELD_PYTHON_TYPES:
+        return True
+    return base != "Field" and base.endswith("Field")

@@ -549,6 +549,9 @@ def _field_names_for(model: "ModelInfo", index: "DjangoIndex") -> set[str]:
     out.update(model.fk_id_accessors)
     out.add("pk")
     out.update(index.reverse_relations.get(model.qualname, {}).keys())
+    # Lookup-style entries (``ordering``, ``search_fields``, …) spell a
+    # reverse relation with its query name, not the ``_set`` accessor.
+    out.update(index.reverse_query_names(model.qualname))
     return out
 
 

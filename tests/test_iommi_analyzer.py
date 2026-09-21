@@ -1556,3 +1556,73 @@ def test_invalid_assignment_on_non_refinable_is_kept(tmp_path: Path):
     # Message anchors on "str", not a refinable factory name → not even
     # a candidate, and the AST call isn't a refinable factory anyway.
     assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_same_named_local_class_is_not_validated_as_iommi(workspace: Path):
+    """``class Table(Token)`` in the file shadows iommi's — leave it alone."""
+    diags = _diagnose(workspace, """
+        from tri_token import Token, TokenAttribute
+
+        class Table(Token):
+            hubspot_id = TokenAttribute(default=None)
+
+        t = Table(hubspot_id='pipeline')
+    """)
+    assert diags == []
+
+
+def test_local_subclass_of_an_iommi_class_is_still_validated(workspace: Path):
+    """The shadowing guard must not swallow a real iommi subclass.
+
+    (Calls to the subclass itself were never validated — only its
+    ``class Meta``, which is what this pins.)
+    """
+    diags = _diagnose(workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            class Meta:
+                bogus_thing = 1
+    """)
+    assert len(diags) == 1
+    assert "bogus_thing" in diags[0]["message"]
+
+
+def test_function_local_import_of_a_same_named_class(workspace: Path):
+    """``from app.kinds import Table`` inside a test — not iommi's Table."""
+    (workspace / "app").mkdir()
+    (workspace / "app" / "__init__.py").write_text("")
+    (workspace / "app" / "kinds.py").write_text(
+        "from dataclasses import dataclass\n"
+        "\n"
+        "@dataclass\n"
+        "class Table:\n"
+        "    name: str = ''\n"
+    )
+    diags = _diagnose(workspace, """
+        def test_thing():
+            from app.kinds import Table
+
+            t = Table(name='x')
+            assert t
+    """)
+    assert diags == []
+
+
+def test_project_wrapper_subclass_is_still_validated(workspace: Path):
+    """``from app.iommi import Table`` — a project's own subclass counts."""
+    (workspace / "app").mkdir(exist_ok=True)
+    (workspace / "app" / "__init__.py").write_text("")
+    (workspace / "app" / "iommi.py").write_text(
+        "import iommi\n"
+        "\n"
+        "class Table(iommi.Table):\n"
+        "    pass\n"
+    )
+    diags = _diagnose(workspace, """
+        from app.iommi import Table
+
+        t = Table(bogus_thing=1)
+    """)
+    assert len(diags) == 1
+    assert "bogus_thing" in diags[0]["message"]

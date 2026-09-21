@@ -96,13 +96,26 @@ Covered call shapes:
 Receivers we recognise (anything else is silent):
 
 * `Model.objects.…` and friends (`_default_manager`, `_base_manager`);
-* `pkg.Model.objects.…` / `myapp.models.Model.objects.…` — the rightmost
-  attribute segment is matched against the index by simple name, so it
-  inherits the index's natural ambiguity protection (two models with the
-  same simple name → silent);
+* `pkg.Model.objects.…` / `myapp.models.Model.objects.…` — the module
+  prefix is resolved through the file's imports first (`import
+  app.prospects.models as old` makes `old.Service` that app's Service,
+  not the `Service` the file imported at the top). When the prefix names
+  a module we know and the class isn't a model there, we stay silent
+  rather than fall back to a same-named model in another app;
 * local variables previously assigned from any of the above within the
   same function (or at module scope), including chained reassignments
   like `qs = User.objects.all(); qs = qs.filter(...); qs.filter(...)`.
+
+Name resolution is scope-aware: a deferred import inside a function
+(`def fixture(): from app.prospects.models import Service`) shadows the
+module-level import of the same name for that body only — the two often
+name different models in the same file.
+
+Reverse relations are accepted (and completed) by their *query* name:
+`related_name` when the field declares one, the bare lowercased model
+name otherwise. `Project.objects.filter(job__isnull=True)` is right;
+`job_set` is the instance accessor. We accept both, since flagging the
+accessor would trade one false positive for another.
 
 Bias is the same as the subtractive filter — when the receiver is
 unknown, ambiguous, or comes from a parameter / queryset method we don't

@@ -198,6 +198,9 @@ class IommiAnalyzer:
         # build attempts.
         self._auto_build = auto_build
         self._cache: dict[str, _ParsedFile] = {}
+        # Parsed workspace modules, for checking whether an imported name
+        # is an iommi class. path → (cache key, tree, imports).
+        self._module_cache: dict[str, tuple[tuple, ast.Module, dict[str, str]]] = {}
         self._open_bucket_cache: frozenset[str] | None = None
         # Background rebuild handle. ``index()`` spawns this whenever a
         # graph was loaded from disk so the user benefits from the
@@ -746,25 +749,112 @@ class IommiAnalyzer:
         user_iommi_subclasses = _collect_user_iommi_subclasses(
             parsed.tree, imports, self.graph,
         )
+        # Classes the file declares itself. One named like an iommi class
+        # but built on something else — ``class Field(Token)`` — must not
+        # be validated against iommi's refinables.
+        local_classes = {
+            node.name
+            for node in ast.walk(parsed.tree)
+            if isinstance(node, ast.ClassDef)
+        }
+        shadowing = local_classes - set(user_iommi_subclasses)
         for node in ast.walk(parsed.tree):
             if isinstance(node, ast.Call):
-                yield from self._scan_call(parsed, node, imports)
+                yield from self._scan_call(parsed, node, imports, shadowing)
             elif isinstance(node, ast.ClassDef):
                 yield from self._scan_class_meta(
                     parsed, node, imports, user_iommi_subclasses,
                 )
 
+    def _qualname_may_be_iommi(self, qualname: str, _depth: int = 0) -> bool:
+        """Could *qualname* name an iommi class (or a subclass of one)?
+
+        A bare name carries no information, and anything imported from
+        ``iommi`` obviously qualifies. For a workspace module we read the
+        class's bases: a project's ``Form(iommi.Form)`` wrapper is fair
+        game for refinable validation, a plain ``@dataclass class Field``
+        that happens to share a name with ``iommi.form.Field`` is not.
+        Unreadable or unfound modules stay permissive.
+        """
+        if "." not in qualname:
+            return True
+        module, _, name = qualname.rpartition(".")
+        if module.split(".", 1)[0] == "iommi":
+            return True
+        if _depth >= 3:
+            return True
+        cls_def, imports = self._workspace_class(module, name)
+        if cls_def is None:
+            return True
+        for base in cls_def.bases:
+            qn = _resolve_callee(base, imports)
+            if qn is None:
+                continue
+            if self.graph.get(qn) is not None:
+                return True
+            if self.graph.lookup_simple(qn.rsplit(".", 1)[-1]) is not None:
+                return True
+            if self._qualname_may_be_iommi(qn, _depth + 1):
+                # Only a resolvable workspace class counts here —
+                # ``_qualname_may_be_iommi`` is permissive about names it
+                # can't find, which would make every base look iommi-ish.
+                base_module, _, base_name = qn.rpartition(".")
+                if self._workspace_class(base_module, base_name)[0] is not None:
+                    return True
+        return False
+
+    def _workspace_class(
+        self, module: str, name: str,
+    ) -> tuple[ast.ClassDef | None, dict[str, str]]:
+        """Find ``class <name>`` in a workspace *module*, with its imports."""
+        rel = Path(*module.split("."))
+        for candidate in (
+            self.workspace_root / rel.with_suffix(".py"),
+            self.workspace_root / rel / "__init__.py",
+        ):
+            try:
+                stat = candidate.stat()
+            except OSError:
+                continue
+            key = (str(candidate), stat.st_mtime_ns)
+            cached = self._module_cache.get(str(candidate))
+            if cached is None or cached[0] != key:
+                try:
+                    tree = ast.parse(candidate.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+                    return None, {}
+                cached = (key, tree, _collect_imports(tree))
+                self._module_cache[str(candidate)] = cached
+            _, tree, imports = cached
+            for node in tree.body:
+                if isinstance(node, ast.ClassDef) and node.name == name:
+                    return node, imports
+            return None, imports
+        return None, {}
+
     def _scan_call(
-        self, parsed: _ParsedFile, node: ast.Call, imports: dict[str, str],
+        self,
+        parsed: _ParsedFile,
+        node: ast.Call,
+        imports: dict[str, str],
+        shadowing: frozenset[str] | set[str] = frozenset(),
     ):
         cls_qualname = _resolve_callee(node.func, imports)
         if cls_qualname is None:
+            return
+        if isinstance(node.func, ast.Name) and node.func.id in shadowing:
             return
         cls = self.graph.get(cls_qualname)
         if cls is None:
             # Try simple-name lookup — useful when the user imports
             # a class via re-export (`from iommi import Table`) but
-            # we recorded it under its source module.
+            # we recorded it under its source module, and for project
+            # wrappers (`from app.iommi import Form`) that subclass one.
+            # Skipped when the import points at a workspace class we can
+            # see is unrelated to iommi: an ``app.kinds.Field`` dataclass
+            # must not be validated against ``iommi.form.Field``.
+            if not self._qualname_may_be_iommi(cls_qualname):
+                return
             simple = cls_qualname.rsplit(".", 1)[-1]
             cls = self.graph.lookup_simple(simple)
             if cls is None:
@@ -1102,19 +1192,28 @@ def _find_attribute_at(tree: ast.Module, range_: dict) -> ast.Attribute | None:
 
 
 def _collect_imports(tree: ast.Module) -> dict[str, str]:
-    """Map local name → fully-qualified import. Same idea as the Django index."""
+    """Map local name → fully-qualified import. Same idea as the Django index.
+
+    Module-level imports are collected first and win; function-local ones
+    (``def test_x(): from app.kinds import Field``) fill in the rest, so a
+    locally-imported name isn't mistaken for a same-named iommi class.
+    """
     out: dict[str, str] = {}
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                head = alias.name.split(".")[0]
-                out[alias.asname or head] = alias.name if alias.asname else head
-        elif isinstance(node, ast.ImportFrom):
-            if node.module is None or node.level:
-                continue
-            for alias in node.names:
-                local = alias.asname or alias.name
-                out[local] = f"{node.module}.{alias.name}"
+    for scope in (tree.body, ast.walk(tree)):
+        for node in scope:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    head = alias.name.split(".")[0]
+                    out.setdefault(
+                        alias.asname or head,
+                        alias.name if alias.asname else head,
+                    )
+            elif isinstance(node, ast.ImportFrom):
+                if node.module is None or node.level:
+                    continue
+                for alias in node.names:
+                    local = alias.asname or alias.name
+                    out.setdefault(local, f"{node.module}.{alias.name}")
     return out
 
 

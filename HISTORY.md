@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Attribute access, assignment and arithmetic *through* a Django field no longer warn (the descriptor is invisible to ty)
+- "Code is unreachable" no longer cascades from a guard that narrows on a model field
+- Unused-parameter hints dropped on pytest fixtures/test modules and on stub bodies
+- `id` accepted in ORM lookups on implicit-PK models, and reverse relations accepted by their query name (`job`, not just `job_set`)
+- Module-qualified model references (`import app.models as old; old.Service`) resolve to the right model
+- A class that merely shares a name with an iommi class (locally defined, or imported inside a function) is no longer validated against iommi's refinables
+- `[tool.ty.analysis.names-to-types]` is read, so unannotated names resolve the way ty resolves them
+- A `f(**some_dict)` call no longer reports one argument error per parameter of the callee
+- Function-local imports (the deferred-import idiom) now bind names for that scope
 - Suppress ty's `invalid-assignment` on `response[header] = value` (HTTP response subscript assignment)
 - Another fallback to handle `instance.id` and similar django-isms
 - Model FK assignment no longer warns about mismatched types

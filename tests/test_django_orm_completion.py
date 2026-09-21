@@ -55,8 +55,11 @@ def test_completion_empty_partial_returns_all_fields(analyzer_basic, tmp_path):
     assert "username" in labels
     assert "email" in labels
     assert "pk" in labels
-    # `profile_set` reverse from Profile -> User.
-    assert "profile_set" in labels
+    # Reverse from Profile -> User. Inside a lookup that's the reverse
+    # *query* name (`profile`); `profile_set` is the instance accessor
+    # and isn't valid here.
+    assert "profile" in labels
+    assert "profile_set" not in labels
 
 
 def test_completion_partial_prefix_filters(analyzer_basic, tmp_path):

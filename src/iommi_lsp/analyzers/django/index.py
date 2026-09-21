@@ -117,6 +117,16 @@ class ModelInfo:
 @dataclass
 class DjangoIndex:
     models: dict[str, ModelInfo] = field(default_factory=dict)
+    # target model qualname -> {reverse *query* name -> source model qualname}
+    # Django splits the two: the accessor on an instance is
+    # ``<lower>_set`` (or ``related_name``), but the name you filter on is
+    # ``related_query_name`` — which defaults to ``related_name`` when
+    # that's set and to the bare lowercased model name when it isn't. So
+    # ``Project.objects.filter(job__isnull=False)`` is right while
+    # ``project.job_set.all()`` is the attribute form of the same thing.
+    reverse_query_relations: dict[str, dict[str, str]] = field(
+        default_factory=lambda: defaultdict(dict)
+    )
     # target model qualname -> {reverse attr name -> source model qualname}
     # The source is the model that *declared* the FK/M2M whose reverse
     # accessor lives on the target. Walkers need it to step through a
@@ -126,6 +136,13 @@ class DjangoIndex:
     )
     # simple-name index for fast receiver lookup (e.g. "User" -> [qualname, ...])
     by_simple_name: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
+    # Modules known to declare models. Lets a module-qualified reference
+    # (``old.Service`` after ``import app.models as old``) tell "that
+    # module has no such model" apart from "that module is unknown to us".
+    modules: set[str] = field(default_factory=set)
+    # Every field name declared by any indexed model. Coarse by design —
+    # used only where an attribute name is all we have to go on.
+    field_names: set[str] = field(default_factory=set)
     # Union of method names declared on any class inheriting (transitively)
     # from ``django.db.models.QuerySet`` or ``Manager`` in the workspace.
     # Used to suppress ``Model.objects.<custom_method>`` false positives —
@@ -144,6 +161,7 @@ class DjangoIndex:
     def add_model(self, info: ModelInfo) -> None:
         self.models[info.qualname] = info
         self.by_simple_name[info.name].append(info.qualname)
+        self.modules.add(info.module)
 
     def reverse_attrs(self, model_qualname: str) -> set[str]:
         return set(self.reverse_relations.get(model_qualname, {}).keys())
@@ -151,6 +169,24 @@ class DjangoIndex:
     def reverse_source(self, model_qualname: str, reverse_name: str) -> str | None:
         """Source model qualname for a reverse accessor on *model_qualname*."""
         return self.reverse_relations.get(model_qualname, {}).get(reverse_name)
+
+    def reverse_query_source(
+        self, model_qualname: str, reverse_name: str
+    ) -> str | None:
+        """Source model qualname for a reverse name usable in a lookup.
+
+        Accepts the query name and the accessor: ``job`` and ``job_set``
+        both point at the same relation, and only flagging the latter
+        would trade one false positive for another.
+        """
+        return (
+            self.reverse_query_relations.get(model_qualname, {}).get(reverse_name)
+            or self.reverse_relations.get(model_qualname, {}).get(reverse_name)
+        )
+
+    def reverse_query_names(self, model_qualname: str) -> set[str]:
+        """Reverse names valid inside a ``filter()``-style lookup."""
+        return set(self.reverse_query_relations.get(model_qualname, {}))
 
     def reverse_field(
         self, target_qualname: str, reverse_name: str,
@@ -819,12 +855,14 @@ def assemble_index(
                 else:
                     continue
             reverse_name = fi.related_name
+            query_name = fi.related_name or info.name.lower()
             if reverse_name is None:
                 reverse_name = f"{info.name.lower()}_set"
             if reverse_name == "+":
                 # Django convention: disables the reverse relation.
                 continue
             index.reverse_relations[target][reverse_name] = info.qualname
+            index.reverse_query_relations[target][query_name] = info.qualname
 
     # Fifth pass: workspace-wide union of custom QuerySet / Manager method
     # names. ``objects = MyQuerySet.as_manager()`` exposes those methods on
@@ -839,6 +877,11 @@ def assemble_index(
     # that inherit it, so ``self`` inside a non-model mixin resolves to its
     # concrete model users.
     index.descendants_of = _build_descendant_map(raws, index.models)
+
+    # Seventh pass: the flat set of every field name in the workspace, for
+    # checks that have an attribute name but no resolvable receiver.
+    for info in index.models.values():
+        index.field_names.update(info.fields)
 
     return index
 

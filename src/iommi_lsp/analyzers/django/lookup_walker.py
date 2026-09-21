@@ -59,8 +59,10 @@ def _walk_from(
 
     seg = chain[i]
 
-    # `pk` — alias for primary key. Treat as leaf scalar.
-    if seg == "pk":
+    # `pk` — alias for primary key. Treat as leaf scalar. `id` is the
+    # column Django adds itself when the model declares no explicit PK,
+    # so `page__id=…` is as valid as `page__pk=…`.
+    if seg == "pk" or (seg == "id" and model.implicit_id):
         return _step_after_leaf(model, chain, i + 1)
 
     # `<fk>_id` — explicit underlying-column accessor on FK/OneToOne.
@@ -70,7 +72,7 @@ def _walk_from(
     fi = model.fields.get(seg)
     if fi is None:
         # Reverse relation?
-        source = index.reverse_source(model.qualname, seg)
+        source = index.reverse_query_source(model.qualname, seg)
         if source is not None:
             # Reverse-relation + lookup (`tags__in=[…]`) acts as a leaf.
             if i + 1 < len(chain) and chain[i + 1] in ORM_LOOKUP_NAMES:
@@ -128,5 +130,7 @@ def _available_segments(index: DjangoIndex, model: ModelInfo) -> set[str]:
     names: set[str] = set(model.fields.keys())
     names.update(model.fk_id_accessors)
     names.add("pk")
-    names.update((index.reverse_relations.get(model.qualname) or {}).keys())
+    if model.implicit_id:
+        names.add("id")
+    names.update(index.reverse_query_names(model.qualname))
     return names

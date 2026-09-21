@@ -34,6 +34,7 @@ from .index import (
     ModelInfo,
     _FileScrape,
     _build_import_map,
+    _flatten_attribute,
     _module_qualname,
     assemble_index,
     collect_scrapes,
@@ -46,6 +47,7 @@ from .magic import (
     ORM_LOOKUP_NAMES,
     RELATION_FIELD_NAMES,
     SCALAR_FIELD_PYTHON_TYPES,
+    is_model_field_type_name,
 )
 
 if TYPE_CHECKING:
@@ -146,6 +148,9 @@ class DjangoAnalyzer:
         # instance state is safe.
         self._ctx_module: str | None = None
         self._ctx_imports: dict[str, str] = {}
+        # (start line, end line, {name: qualname}) per function that
+        # imports names itself — a local import shadows the module's.
+        self._ctx_scoped_imports: list[tuple[int, int, dict[str, str]]] = []
 
     # -- Analyzer protocol ----------------------------------------------------
 
@@ -281,6 +286,15 @@ class DjangoAnalyzer:
         # gave up. Suppress when every same-named model treats the attr as
         # magic — the access is valid whichever one ty meant.
         if self._message_type_is_magic_on_all_models(
+            diagnostic.get("message"), attr_name
+        ):
+            return True
+
+        # Union-of-model-classes receiver: iterating a table of model
+        # classes (``for model, _ in PAIRS: model.objects…``) gives ty a
+        # receiver type like ``<class 'PageLang'> | <class 'SnippetAtPage'>``.
+        # Suppress when the attr is Django magic on every arm.
+        if self._message_union_is_magic_on_all_arms(
             diagnostic.get("message"), attr_name
         ):
             return True
@@ -428,20 +442,44 @@ class DjangoAnalyzer:
         module pin the name down — ``from a.models import Service`` means
         ``Service`` in this file is ``a.models.Service``, full stop.
         """
-        self._ctx_module = _module_qualname(self.workspace_root, path)
-        self._ctx_imports = _build_import_map(
-            tree, self._ctx_module, is_package=path.name == "__init__.py"
-        )
+        cached = getattr(tree, _FILE_CONTEXT_ATTR, None)
+        if cached is None:
+            module = _module_qualname(self.workspace_root, path)
+            is_package = path.name == "__init__.py"
+            cached = (
+                module,
+                _build_import_map(tree, module, is_package=is_package),
+                _build_scoped_import_maps(tree, module, is_package=is_package),
+            )
+            try:
+                setattr(tree, _FILE_CONTEXT_ATTR, cached)
+            except (AttributeError, TypeError):
+                pass
+        self._ctx_module, self._ctx_imports, self._ctx_scoped_imports = cached
 
-    def _lookup(self, simple_name: str) -> ModelInfo | None:
+    def _lookup(self, simple_name: str, lineno: int | None = None) -> ModelInfo | None:
         """Resolve a bare model name using the current file's context.
 
-        Import binding wins (it's authoritative for this file), then a
-        same-module definition, then the index's generic simple-name
-        ``lookup`` (which keeps the workspace-shadows-builtin rule). Each
-        precise step only fires when it lands on a known model, so an
-        import of a non-model name harmlessly falls through.
+        A function-local import wins over the module-level one when
+        *lineno* puts us inside that function — ``def fixture(): from
+        app.prospects.models import Service`` shadows a module-level
+        ``from app.core.models import Service`` for that body only. Then
+        the module-level import binding (authoritative for this file), a
+        same-module definition, and finally the index's generic
+        simple-name ``lookup`` (which keeps the workspace-shadows-builtin
+        rule). Each precise step only fires when it lands on a known
+        model, so an import of a non-model name harmlessly falls through.
         """
+        if lineno is not None:
+            for start, end, scoped in self._ctx_scoped_imports:
+                if not (start <= lineno <= end):
+                    continue
+                qualname = scoped.get(simple_name)
+                if qualname is None:
+                    continue
+                info = self.django_index.models.get(qualname)
+                if info is not None:
+                    return info
         imports = self._ctx_imports
         if simple_name in imports:
             info = self.django_index.models.get(imports[simple_name])
@@ -453,16 +491,59 @@ class DjangoAnalyzer:
                 return info
         return self.django_index.lookup(simple_name)
 
+    def _lookup_qualified(self, node: ast.Attribute) -> ModelInfo | None:
+        """Resolve a module-qualified model reference — ``old.Service``.
+
+        ``import dryft.prospects.models as old`` makes ``old.Service`` the
+        *prospects* Service even when the file also does ``from
+        dryft.core.models import Service``. Falling back to the simple
+        name (as :meth:`_lookup` does) would pick the imported one and
+        validate against the wrong model's fields.
+
+        Returns ``None`` when the prefix names a module we know about but
+        the qualified name isn't a model there — better to skip validation
+        than to guess at a same-named model from another app.
+        """
+        flat = _flatten_attribute(node)
+        if flat is None or "." not in flat:
+            return None
+        lineno = getattr(node, "lineno", None)
+        prefix, _, name = flat.rpartition(".")
+        head, _, rest = prefix.partition(".")
+        module = self._scoped_import(head, lineno) or self._ctx_imports.get(head, head)
+        if rest:
+            module = f"{module}.{rest}"
+        info = self.django_index.models.get(f"{module}.{name}")
+        if info is not None:
+            return info
+        if module in self.django_index.modules:
+            # Known module, unknown name — e.g. a non-model class or a
+            # typo. Don't fall back to a same-named model elsewhere.
+            return None
+        return self._lookup(name, lineno)
+
+    def _scoped_import(self, name: str, lineno: int | None) -> str | None:
+        """Qualname *name* is bound to by an import local to this line's scope."""
+        if lineno is None:
+            return None
+        for start, end, scoped in self._ctx_scoped_imports:
+            if start <= lineno <= end and name in scoped:
+                return scoped[name]
+        return None
+
     def _resolve_receiver_model(
         self, receiver: ast.AST, tree: ast.Module
     ) -> ModelInfo | None:
         # (a) Syntactic match: bare Name -> class lookup by simple name.
         if isinstance(receiver, ast.Name):
-            model = self._lookup(receiver.id)
+            model = self._lookup(receiver.id, getattr(receiver, "lineno", None))
             if model is not None:
                 return model
             # (b) Local flow: search enclosing scope for an assignment.
             return self._resolve_local_variable(receiver.id, receiver, tree)
+        # (c) Module-qualified class reference: ``old.Service._meta``.
+        if isinstance(receiver, ast.Attribute):
+            return self._lookup_qualified(receiver)
         return None
 
     def _resolve_local_variable(
@@ -704,6 +785,36 @@ class DjangoAnalyzer:
             return False
         return all(self._attr_is_magic(m, attr_name) for m in candidates)
 
+    def _message_union_is_magic_on_all_arms(
+        self, message: object, attr_name: str
+    ) -> bool:
+        """Union-of-model-classes fallback for the message-based resolver.
+
+        ``for unpublic_model, public_model, compare in _PAIRS:`` binds a
+        union of model *class objects*, which ty prints as ``<class
+        'PageLang'> | <class 'SnippetAtPage'> | …``. Neither the AST
+        resolvers nor the simple-name ones handle that shape, so we split
+        the union and suppress only when every arm is a model that treats
+        the attribute as magic.
+        """
+        if not isinstance(message, str):
+            return False
+        m = _TY_RECEIVER_TYPE_RE.search(message)
+        if m is None:
+            return False
+        raw = _ty_receiver_type_name(m)
+        arms = [a.strip() for a in raw.split("|")]
+        if len(arms) < 2:
+            return False
+        for arm in arms:
+            cls = _TY_CLASS_OBJECT_RE.fullmatch(arm)
+            if cls is None:
+                return False
+            model = self._lookup(cls.group(1).rsplit(".", 1)[-1])
+            if model is None or not self._attr_is_magic(model, attr_name):
+                return False
+        return True
+
     def _model_from_annotation(self, ann: ast.AST | None) -> ModelInfo | None:
         if ann is None:
             return None
@@ -898,6 +1009,16 @@ class DjangoAnalyzer:
             except Exception:
                 _log.exception("unused-request check crashed; keeping the diagnostic")
                 return False
+        if _unused_hint_name(diagnostic) is not None:
+            try:
+                kind = self._unused_param_kind(uri, diagnostic)
+            except Exception:
+                _log.exception("unused-param check crashed; keeping the diagnostic")
+                return False
+            if kind == "test" and self.config.is_rule_enabled("unused_test_param"):
+                return True
+            if kind == "stub" and self.config.is_rule_enabled("unused_param_in_stub"):
+                return True
         if (
             _is_choices_enum_member_assignment(diagnostic)
             and self.config.is_rule_enabled("choices_enum")
@@ -907,6 +1028,29 @@ class DjangoAnalyzer:
             except Exception:
                 _log.exception("choices-enum check crashed; keeping the diagnostic")
                 return False
+        # Ahead of the ``f_operator`` branch below: that one answers for
+        # every unsupported-operator diagnostic, so a later check would
+        # never see one.
+        if (
+            _is_field_operand_operator(diagnostic)
+            and self.config.is_rule_enabled("field_operator")
+        ):
+            return True
+        if (
+            _is_field_argument_type(diagnostic)
+            and self.config.is_rule_enabled("field_argument_type")
+        ):
+            return True
+        if (
+            _is_argument_shape_message(diagnostic)
+            and self.config.is_rule_enabled("splat_argument")
+        ):
+            try:
+                if self._call_has_splat(uri, diagnostic):
+                    return True
+            except Exception:
+                _log.exception("splat-argument check crashed; keeping the diagnostic")
+                return False
         if (
             _is_unsupported_operator(diagnostic)
             and self.config.is_rule_enabled("f_operator")
@@ -915,6 +1059,23 @@ class DjangoAnalyzer:
                 return self._is_combinable_operator(uri, diagnostic)
             except Exception:
                 _log.exception("f-operator check crashed; keeping the diagnostic")
+                return False
+        # Ahead of the two field-*declaration* rules below: they answer
+        # for any invalid-assignment naming a field type, so a later
+        # check would never see an assignment *onto* a field attribute.
+        if (
+            _is_field_attribute_assignment(diagnostic)
+            and self.config.is_rule_enabled("field_attribute_assignment")
+        ):
+            return True
+        if (
+            _is_unreachable_hint(diagnostic)
+            and self.config.is_rule_enabled("field_narrowing_unreachable")
+        ):
+            try:
+                return self._is_field_narrowed_unreachable(uri, diagnostic)
+            except Exception:
+                _log.exception("unreachable check crashed; keeping the diagnostic")
                 return False
         if (
             _is_relation_field_assignment_message(diagnostic)
@@ -957,6 +1118,11 @@ class DjangoAnalyzer:
             and self.config.is_rule_enabled("field_union")
         ):
             return True
+        if (
+            _is_relation_field_receiver(diagnostic)
+            and self.config.is_rule_enabled("relation_field_attribute")
+        ):
+            return True
         if not _is_unresolved_attribute(diagnostic):
             return False
         try:
@@ -964,6 +1130,138 @@ class DjangoAnalyzer:
         except Exception:
             _log.exception("analyzer crashed; keeping the diagnostic")
             return False
+
+    def _call_has_splat(self, uri: str, diagnostic: Diagnostic) -> bool:
+        """Is the flagged call passing its arguments as ``**some_dict``?
+
+        ``sentry_sdk.init(**sentry_conf)`` — a settings-module staple —
+        makes ty check every parameter of the callee against the dict's
+        *value union*, so one call produces one diagnostic per parameter
+        (70 of them, in the case that prompted this). None of them says
+        anything about the actual value that will land in that parameter.
+        """
+        path = _uri_to_path(uri)
+        if path is None:
+            return False
+        parsed = self._parse(uri, path)
+        if parsed is None:
+            return False
+        call = _enclosing_call_at(parsed.tree, diagnostic.get("range") or {})
+        if call is None:
+            return False
+        return any(kw.arg is None for kw in call.keywords)
+
+    def _is_field_narrowed_unreachable(
+        self, uri: str, diagnostic: Diagnostic
+    ) -> bool:
+        """Suppress ty's "Code is unreachable" behind a model-field guard.
+
+        ``if option.rejected_time is not None: raise …`` reads, to ty, as
+        "if this ``DateTimeField`` class object is not None" — always
+        true, since the descriptor is invisible to it. The guard is taken
+        unconditionally and the whole rest of the function is greyed out
+        in the editor. We suppress the hint when some ``if`` earlier in
+        the same function tests an attribute we know to be a field on a
+        model, which is the only way that narrowing could have happened.
+        """
+        path = _uri_to_path(uri)
+        if path is None:
+            return False
+        parsed = self._parse(uri, path)
+        if parsed is None:
+            return False
+        self._enter_file_context(path, parsed.tree)
+        start = (diagnostic.get("range") or {}).get("start") or {}
+        target = ast.AST()
+        target.lineno = int(start.get("line", 0)) + 1
+        target.col_offset = int(start.get("character", 0))
+        scope = _enclosing_function(parsed.tree, target)
+        if scope is None:
+            return False
+        # One answer per function, cached on the parse: ty emits a hint
+        # per unreachable statement, and they all share the guard.
+        cache = getattr(parsed.tree, _NARROWING_CACHE_ATTR, None)
+        if cache is None:
+            cache = {}
+            try:
+                setattr(parsed.tree, _NARROWING_CACHE_ATTR, cache)
+            except (AttributeError, TypeError):
+                pass
+        key = (scope.lineno, getattr(scope, "end_lineno", scope.lineno))
+        guard_line = cache.get(key)
+        if guard_line is None:
+            guard_line = 0
+            for node in ast.walk(scope):
+                if not isinstance(
+                    node, (ast.If, ast.While, ast.IfExp, ast.Assert)
+                ):
+                    continue
+                if self._tests_model_field(node.test, parsed.tree):
+                    guard_line = (
+                        node.lineno if guard_line == 0
+                        else min(guard_line, node.lineno)
+                    )
+            cache[key] = guard_line
+        return guard_line != 0 and guard_line < target.lineno
+
+    def _tests_model_field(self, test: ast.AST, tree: ast.Module) -> bool:
+        """True when *test* reads an attribute that is a field on a model.
+
+        Falls back to the workspace-wide set of field names when the
+        receiver doesn't resolve — ``closed_out = other.chain.actions
+        .order_by('pk').last()`` is beyond our flow analysis, but
+        ``closed_out.accepted_time is None`` is still the narrowing that
+        greyed out the rest of the function. That's a coarse test, and it
+        only ever suppresses an unreachable-code *hint*.
+        """
+        for node in ast.walk(test):
+            if not isinstance(node, ast.Attribute):
+                continue
+            models = self._candidate_models(node.value, tree)
+            if models:
+                if any(node.attr in m.fields for m in models):
+                    return True
+                continue
+            if node.attr in self.django_index.field_names:
+                return True
+        return False
+
+    def _candidate_models(
+        self, receiver: ast.AST, tree: ast.Module
+    ) -> list[ModelInfo]:
+        """Every model *receiver* could be, by any resolution channel."""
+        out: list[ModelInfo] = []
+        for model in (
+            self._resolve_receiver_model(receiver, tree),
+            self._resolve_via_annotation(receiver, tree),
+        ):
+            if model is not None:
+                out.append(model)
+        out.extend(self._resolve_via_names_to_types(receiver))
+        return out
+
+    def _resolve_via_names_to_types(self, receiver: ast.AST) -> list[ModelInfo]:
+        """Models a name maps to under ``[tool.ty.analysis.names-to-types]``.
+
+        ty-semantic types unannotated names by that table, which is how it
+        knows a pytest fixture parameter called ``action`` is an ``Action``
+        — nothing in the source says so. Reading the same table keeps our
+        AST resolvers in step with the types ty inferred. A ``A|B`` entry
+        yields both models.
+        """
+        if not isinstance(receiver, ast.Name):
+            return []
+        qualnames = self.config.names_to_types.get(receiver.id)
+        if not qualnames:
+            return []
+        out: list[ModelInfo] = []
+        for qualname in qualnames:
+            model = self.django_index.models.get(qualname)
+            if model is None:
+                model = self._lookup(qualname.rsplit(".", 1)[-1])
+            if model is not None:
+                out.append(model)
+        return out
 
     def _is_in_choices_class(self, uri: str, diagnostic: Diagnostic) -> bool:
         path = _uri_to_path(uri)
@@ -1117,6 +1415,42 @@ class DjangoAnalyzer:
             if first.lineno == line_no and first.col_offset == col:
                 return True
         return False
+
+    def _unused_param_kind(self, uri: str, diagnostic: Diagnostic) -> str | None:
+        """Classify ty's "unused" hint when it sits on a parameter.
+
+        ``"test"`` — a parameter of a test function, a pytest fixture, or
+        any callable in a test module. ``def test_publishing(project,
+        action):`` doesn't have to mention ``action``: naming it is what
+        asks pytest to create the row, and plenty of fixtures exist purely
+        for that side effect. Fakes and stubs in test modules are the same
+        story from the other end — they take the parameters the real
+        collaborator takes and ignore them.
+
+        ``"stub"`` — a parameter of a function whose body is a docstring,
+        ``...``, ``pass`` or ``raise NotImplementedError``. The signature
+        is the contract it's declaring; the body is meant to be empty.
+
+        ``None`` — anything else, including a hint that isn't on a
+        parameter at all (an unused local, say), which we leave alone.
+        """
+        path = _uri_to_path(uri)
+        if path is None:
+            return None
+        parsed = self._parse(uri, path)
+        if parsed is None:
+            return None
+        start = (diagnostic.get("range") or {}).get("start") or {}
+        line_no = int(start.get("line", 0)) + 1
+        col = int(start.get("character", 0))
+        node = _param_owner_index(parsed.tree).get((line_no, col))
+        if node is None:
+            return None
+        if _is_test_module(path) or _is_pytest_function(node):
+            return "test"
+        if _is_stub_body(node):
+            return "stub"
+        return None
 
     def resolve_definition(self, uri: str, position: dict) -> dict | None:
         """Resolve a jump-to-definition request on a Django-magic accessor.
@@ -1669,7 +2003,7 @@ class DjangoAnalyzer:
                 return None
             owner = cur.value
             if isinstance(owner, ast.Name):
-                info = self._lookup(owner.id)
+                info = self._lookup(owner.id, getattr(owner, "lineno", None))
                 if info is not None:
                     return info
                 # Fall back to local-flow resolution: ``UserCls =
@@ -1681,7 +2015,7 @@ class DjangoAnalyzer:
                 return None
             if isinstance(owner, ast.Attribute):
                 # `models.User.objects` / `app.models.User.objects`.
-                return self._lookup(owner.attr)
+                return self._lookup_qualified(owner)
             return None
 
         # Bare name — could be a local queryset variable.
@@ -1933,17 +2267,29 @@ def _is_field_union_attribute(diagnostic: Diagnostic) -> bool:
     return "Field" in m.group(2)
 
 
-# ty spells the inferred receiver type two ways across versions:
-#   * ``Object of type `Project` has no attribute `id``` (ty-semantic)
-#   * ``Type "Project" has no attribute "id"`` (older)
-# Both anchor at the start of the message; one capture group covers both.
-_TY_RECEIVER_TYPE_RE = re.compile(r'(?:Object of type `([^`]+)`|Type "([^"]+)")')
+# ty spells the inferred receiver type four ways, varying by version:
+#   * ``Object of type `Project` has no attribute `id``` (an instance)
+#   * ``Class `Project` has no attribute `objects``` (the class object —
+#     what you get from ``Project.objects`` / ``model._meta``)
+#   * ``Unresolved attribute `id` on type `Project``` (older ty)
+#   * ``Type "Project" has no attribute "id"`` (older still)
+# One group per spelling.
+_TY_RECEIVER_TYPE_RE = re.compile(
+    r'(?:Object of type `([^`]+)`|Class `([^`]+)`'
+    r'|on type `([^`]+)`|Type "([^"]+)")'
+)
 
 
-# The single capture group above doesn't work for two alternatives — use
-# a small wrapper that returns whichever group matched.
+# How ty prints a class object inside a type: ``<class 'PageLang'>``.
+_TY_CLASS_OBJECT_RE = re.compile(r"<class '([^']+)'>")
+
+
+# One capture group can't cover the alternatives — use a small wrapper
+# that returns whichever group matched.
 def _ty_receiver_type_name(match: re.Match) -> str:
-    return match.group(1) or match.group(2)
+    return (
+        match.group(1) or match.group(2) or match.group(3) or match.group(4)
+    )
 
 
 _CHOICES_BASE_NAMES = frozenset({"Choices", "IntegerChoices", "TextChoices"})
@@ -2085,6 +2431,186 @@ def _find_op_at(tree: ast.Module, range_: dict) -> ast.AST | None:
     return best
 
 
+# ty names the receiver type of a failed attribute access in one of two
+# shapes; both can carry intersections (``ForeignKey & ~AlwaysFalsy``) and
+# union arms (``ForeignKey | Unknown``), so we pull out every arm.
+_TY_TYPE_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
+
+
+def _receiver_type_arms(message: str) -> list[str]:
+    """Type names ty blamed for a failed attribute access.
+
+    ``Object of type `ForeignKey & ~AlwaysFalsy` has no attribute `x``` →
+    ``['ForeignKey', 'AlwaysFalsy']``; ``Attribute `x` is not defined on
+    `ForeignKey` in union `ForeignKey | Unknown``` → ``['ForeignKey']``.
+    """
+    union = _TY_UNION_ATTR_RE.search(message)
+    if union is not None:
+        raw = union.group(1)
+    else:
+        m = _TY_RECEIVER_TYPE_RE.search(message)
+        if m is None:
+            return []
+        raw = _ty_receiver_type_name(m)
+    return _TY_TYPE_TOKEN_RE.findall(raw)
+
+
+def _is_relation_field_receiver(diagnostic: Diagnostic) -> bool:
+    """Match ty's ``unresolved-attribute`` on a relation-field receiver.
+
+    ``option.option_group.project`` — Django's forward descriptor makes
+    ``option.option_group`` an ``OptionGroup`` instance at runtime, but a
+    static reader sees the ``ForeignKey`` sitting on the class body and
+    reports every attribute of the related model as missing. Anything
+    reached *through* a relation field is therefore noise, whatever the
+    attribute is, so we drop the diagnostic when the receiver type ty
+    named is a relation field.
+    """
+    if not _is_unresolved_attribute(diagnostic):
+        return False
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return False
+    return any(
+        arm.rsplit(".", 1)[-1] in RELATION_FIELD_NAMES
+        for arm in _receiver_type_arms(message)
+    )
+
+
+# ``Object of type `None` is not assignable to attribute `rejected_time`
+# of type `DateTimeField```— assignment *to an instance attribute* whose
+# declared type is a field class (as opposed to the field *declaration*
+# shapes handled by the two ``…_field_assignment`` rules).
+_FIELD_ATTR_ASSIGN_RE = re.compile(
+    r"is not assignable to attribute `[^`]+` of type `([^`]+)`"
+)
+
+
+def _is_field_attribute_assignment(diagnostic: Diagnostic) -> bool:
+    """Match ty's ``invalid-assignment`` onto a Django field attribute.
+
+    ``option.rejected_time = None`` is fine at runtime — the descriptor
+    accepts whatever the column takes (and ``null=True`` columns take
+    ``None``). ty sees the class-body ``DateTimeField`` as the attribute's
+    type and rejects every assignment that isn't another field instance.
+    """
+    code = diagnostic.get("code")
+    code_value = code if isinstance(code, str) else (
+        code.get("value") if isinstance(code, dict) else None
+    )
+    if code_value != "invalid-assignment":
+        return False
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return False
+    m = _FIELD_ATTR_ASSIGN_RE.search(message)
+    if m is None:
+        return False
+    return is_model_field_type_name(m.group(1))
+
+
+# ``Operator `/` is not supported between objects of type `(Unknown &
+# ~AlwaysFalsy) | Literal[0]` and `FloatField & ~AlwaysFalsy``` — the two
+# operand types, each possibly a union / intersection.
+_OPERATOR_OPERANDS_RE = re.compile(
+    r"is not supported between objects of type `([^`]+)` and `([^`]+)`"
+)
+# Both operands the same type: "between two objects of type `FloatField`".
+_OPERATOR_SAME_OPERANDS_RE = re.compile(
+    r"is not supported between two objects of type `([^`]+)`"
+)
+_UNARY_OPERAND_RE = re.compile(
+    r"is not supported for (?:object|type) `([^`]+)`"
+)
+
+
+def _is_field_operand_operator(diagnostic: Diagnostic) -> bool:
+    """Match ty's ``unsupported-operator`` on a Django field operand.
+
+    ``price / material.amount`` — at runtime ``material.amount`` is the
+    float the descriptor yields, but ty types it as the ``FloatField`` on
+    the class body and reports that ``/`` doesn't work on it. Any operand
+    whose type is a model-field class is this same descriptor blind spot.
+    """
+    if not _is_unsupported_operator(diagnostic):
+        return False
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return False
+    operands: tuple[str, ...] = ()
+    for pattern in (
+        _OPERATOR_OPERANDS_RE, _OPERATOR_SAME_OPERANDS_RE, _UNARY_OPERAND_RE,
+    ):
+        m = pattern.search(message)
+        if m is not None:
+            operands = m.groups()
+            break
+    for operand in operands:
+        for token in _TY_TYPE_TOKEN_RE.findall(operand):
+            if is_model_field_type_name(token):
+                return True
+    return False
+
+
+def _is_unreachable_hint(diagnostic: Diagnostic) -> bool:
+    """Match ty's unreachable-code hint (no code, ``Unnecessary`` tag).
+
+    The message carries a second line ("This may depend on your current
+    environment and settings"), so we anchor on the first one.
+    """
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return False
+    return message.strip().splitlines()[:1] == ["Code is unreachable"]
+
+
+# ``Argument to function `f` is incorrect: Expected `int`, found
+# `IntegerField``` — passing ``instance.count`` to a plain function.
+_ARGUMENT_TYPE_FOUND_RE = re.compile(r"found `([^`]+)`")
+
+
+def _is_field_argument_type(diagnostic: Diagnostic) -> bool:
+    """Match ty's ``invalid-argument-type`` where the value is a field.
+
+    ``_check_limit(chat.daily_limit)`` passes the ``int`` the descriptor
+    yields; ty sees the ``IntegerField`` on the class body and reports a
+    type mismatch against the parameter's annotation.
+    """
+    code = diagnostic.get("code")
+    code_value = code if isinstance(code, str) else (
+        code.get("value") if isinstance(code, dict) else None
+    )
+    if code_value != "invalid-argument-type":
+        return False
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return False
+    m = _ARGUMENT_TYPE_FOUND_RE.search(message)
+    if m is None:
+        return False
+    return any(
+        is_model_field_type_name(token)
+        for token in _TY_TYPE_TOKEN_RE.findall(m.group(1))
+    )
+
+
+_ARGUMENT_SHAPE_CODES = frozenset({
+    "invalid-argument-type",
+    "no-matching-overload",
+    "missing-argument",
+    "unknown-argument",
+})
+
+
+def _is_argument_shape_message(diagnostic: Diagnostic) -> bool:
+    """Match the diagnostics ty emits about a call's argument list."""
+    code = diagnostic.get("code")
+    code_value = code if isinstance(code, str) else (
+        code.get("value") if isinstance(code, dict) else None
+    )
+    return code_value in _ARGUMENT_SHAPE_CODES
+
+
 def _is_relation_field_assignment_message(diagnostic: Diagnostic) -> bool:
     """Match ty's ``invalid-assignment`` whose RHS type is a relation field.
 
@@ -2119,6 +2645,38 @@ def _find_call_at(tree: ast.Module, range_: dict) -> ast.Call | None:
         if node.lineno == s_line and node.col_offset == s_col:
             return node
     return None
+
+
+def _enclosing_call_at(tree: ast.Module, range_: dict) -> ast.Call | None:
+    """Smallest ``ast.Call`` whose span contains the LSP range.
+
+    Unlike :func:`_find_call_at`, the range doesn't have to start at the
+    call — ty points argument diagnostics at the argument itself.
+    """
+    start = range_.get("start") or {}
+    end = range_.get("end") or {}
+    s_line = int(start.get("line", 0)) + 1
+    s_col = int(start.get("character", 0))
+    e_line = int(end.get("line", s_line - 1)) + 1
+    e_col = int(end.get("character", s_col))
+
+    best: ast.Call | None = None
+    best_size = (10**9, 10**9)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        nl, nc = node.lineno, node.col_offset
+        nel = node.end_lineno or nl
+        nec = node.end_col_offset or nc
+        if (nl, nc) > (s_line, s_col):
+            continue
+        if (nel, nec) < (e_line, e_col):
+            continue
+        size = (nel - nl, nec - nc)
+        if size < best_size:
+            best = node
+            best_size = size
+    return best
 
 
 def _call_is_relation_field(call: ast.Call) -> bool:
@@ -2276,6 +2834,129 @@ def _subscript_store_target_at(tree: ast.Module, range_: dict) -> bool:
     return False
 
 
+_UNUSED_NAME_RE = re.compile(r"^`([^`]+)` is unused$")
+
+
+def _unused_hint_name(diagnostic: Diagnostic) -> str | None:
+    r"""The name in ty's ``\`x\` is unused`` hint, if that's what this is."""
+    if diagnostic.get("source") != "ty":
+        return None
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return None
+    m = _UNUSED_NAME_RE.match(message.strip())
+    return m.group(1) if m is not None else None
+
+
+# Module name + import maps, computed once per parsed tree — the filter
+# path re-enters the file context for every diagnostic in the batch.
+_FILE_CONTEXT_ATTR = "_iommi_lsp_file_context"
+
+_NARROWING_CACHE_ATTR = "_iommi_lsp_field_narrowing"
+
+_PARAM_OWNER_INDEX_ATTR = "_iommi_lsp_param_owners"
+
+
+def _param_owner_index(tree: ast.Module) -> dict[tuple[int, int], ast.AST]:
+    """``(line, col)`` of every parameter → the callable declaring it.
+
+    Cached on the parsed tree: the unused-parameter filter asks this once
+    per diagnostic, and ty emits one per parameter.
+    """
+    cached = getattr(tree, _PARAM_OWNER_INDEX_ATTR, None)
+    if cached is not None:
+        return cached
+    out: dict[tuple[int, int], ast.AST] = {}
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+        ):
+            continue
+        args = node.args
+        params = list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)
+        if args.vararg is not None:
+            params.append(args.vararg)
+        if args.kwarg is not None:
+            params.append(args.kwarg)
+        for p in params:
+            out.setdefault((p.lineno, p.col_offset), node)
+    try:
+        setattr(tree, _PARAM_OWNER_INDEX_ATTR, out)
+    except (AttributeError, TypeError):
+        pass
+    return out
+
+
+def _is_stub_body(node: ast.AST) -> bool:
+    """A body that declares a signature and does nothing else.
+
+    ``...``, ``pass``, ``raise NotImplementedError`` — with or without a
+    docstring in front. The parameters exist to state the contract an
+    override has to honour, so "unused" says nothing useful about them.
+    """
+    body = list(getattr(node, "body", []) or [])
+    if body and isinstance(body[0], ast.Expr) and isinstance(
+        body[0].value, ast.Constant
+    ) and isinstance(body[0].value.value, str):
+        body = body[1:]
+    if not body:
+        return True
+    if len(body) > 1:
+        return False
+    stmt = body[0]
+    if isinstance(stmt, ast.Pass):
+        return True
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+        return stmt.value.value is Ellipsis
+    if isinstance(stmt, ast.Raise):
+        exc = stmt.exc
+        target = exc.func if isinstance(exc, ast.Call) else exc
+        name = None
+        if isinstance(target, ast.Name):
+            name = target.id
+        elif isinstance(target, ast.Attribute):
+            name = target.attr
+        return name == "NotImplementedError"
+    return False
+
+
+def _is_test_module(path: Path) -> bool:
+    """Is this file a pytest module? (Both the standard and the
+    ``<name>__tests.py`` convention, plus ``conftest.py``.)"""
+    name = path.name
+    if name == "conftest.py":
+        return True
+    if not name.endswith(".py"):
+        return False
+    stem = name[:-3]
+    return (
+        stem.startswith("test_")
+        or stem.endswith("_test")
+        or stem.endswith("__tests")
+        or stem.endswith("_tests")
+    )
+
+
+def _is_pytest_function(node: ast.AST) -> bool:
+    """A test function, or one decorated by pytest (a fixture, mostly)."""
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    if node.name.startswith("test_"):
+        return True
+    for dec in node.decorator_list:
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        flat = _flatten_attribute(target)
+        if flat is None and isinstance(target, ast.Name):
+            flat = target.id
+        if flat is None:
+            continue
+        head = flat.split(".", 1)[0]
+        tail = flat.rsplit(".", 1)[-1]
+        if head == "pytest" or tail in ("fixture", "yield_fixture"):
+            return True
+    return False
+
+
 def _is_unused_request(diagnostic: Diagnostic) -> bool:
     """Match ty's hint ``\\`request\\` is unused``. ty emits this with no
     diagnostic code, so we sniff source + message text directly.
@@ -2286,6 +2967,50 @@ def _is_unused_request(diagnostic: Diagnostic) -> bool:
     if not isinstance(message, str):
         return False
     return message.strip() == "`request` is unused"
+
+
+def _build_scoped_import_maps(
+    tree: ast.Module, module: str | None, *, is_package: bool
+) -> list[tuple[int, int, dict[str, str]]]:
+    """Import bindings made *inside* a function, with the function's span.
+
+    Deferred imports are the norm in Django code — circular-import
+    dodges, fixtures that pull in the old app's models. The names they
+    bind are only in scope for that body, and can name a different model
+    than the module-level import of the same name.
+
+    Innermost function first, so a nested ``def`` shadows its parent.
+    """
+    # One pass over the tree, attributing each import statement to the
+    # innermost function that contains it (``None`` = module or class
+    # level, which the module-wide import map already covers).
+    by_function: dict[int, tuple[ast.AST, list[ast.stmt]]] = {}
+
+    def visit(node: ast.AST, owner: ast.AST | None) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.Import, ast.ImportFrom)):
+                if owner is not None:
+                    by_function.setdefault(id(owner), (owner, []))[1].append(child)
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, child)
+            elif isinstance(child, (ast.ClassDef, ast.Lambda)):
+                visit(child, None)   # its own namespace
+            else:
+                visit(child, owner)
+
+    visit(tree, None)
+
+    out: list[tuple[int, int, dict[str, str]]] = []
+    for node, statements in by_function.values():
+        own = ast.Module(body=list(statements), type_ignores=[])
+        imports = _build_import_map(own, module, is_package=is_package)
+        if imports:
+            end = node.end_lineno or node.lineno
+            out.append((node.lineno, end, imports))
+    # Longer spans first means the innermost match is found last; sort so
+    # the narrowest scope wins the lookup.
+    out.sort(key=lambda item: item[1] - item[0])
+    return out
 
 
 def _uri_to_path(uri: str) -> Path | None:
@@ -2714,7 +3439,11 @@ def _field_completion_items(index, model, partial: str, prefix: str = ""):
             "detail": "FK underlying-column accessor",
         })
     items.setdefault("pk", {"label": "pk", "detail": "primary key alias"})
-    for name, source in (index.reverse_relations.get(model.qualname) or {}).items():
+    if model.implicit_id:
+        items.setdefault("id", {"label": "id", "detail": "primary key"})
+    for name, source in (
+        index.reverse_query_relations.get(model.qualname) or {}
+    ).items():
         items.setdefault(name, {
             "label": name,
             "detail": f"reverse relation → {source}",
@@ -2755,9 +3484,11 @@ def _walk_chain_for_completion(
             return None
         if seg == "pk" or seg in current.fk_id_accessors:
             return None
+        if seg == "id" and current.implicit_id:
+            return None
         fi = current.fields.get(seg)
         if fi is None:
-            source = index.reverse_source(current.qualname, seg)
+            source = index.reverse_query_source(current.qualname, seg)
             if source is None:
                 return None
             current = index.models.get(source)

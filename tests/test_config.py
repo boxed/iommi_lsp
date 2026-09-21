@@ -204,3 +204,33 @@ def test_index_picks_up_config_from_pyproject(tmp_path: Path):
 
     assert analyzer.config.disabled_rules == frozenset({"manager"})
     assert "shop.models.Item" in analyzer.django_index.models
+
+
+def test_names_to_types_is_read_from_tys_own_section(tmp_path: Path):
+    """ty-semantic's table types unannotated names; we read the same one."""
+    _write_pyproject(tmp_path, """
+        [tool.ty.analysis.names-to-types]
+        project = 'app.models.Project'
+        service = 'app.models.Service|other.models.Service'
+    """)
+    c = load(tmp_path)
+    assert c.names_to_types["project"] == ("app.models.Project",)
+    assert c.names_to_types["service"] == (
+        "app.models.Service", "other.models.Service",
+    )
+    # Our own section is absent — the rest of the config stays default.
+    assert c.enabled is True
+    assert c.disabled_rules == frozenset()
+
+
+def test_names_to_types_survives_alongside_our_section(tmp_path: Path):
+    _write_pyproject(tmp_path, """
+        [tool.iommi_lsp]
+        disabled_rules = ["pk"]
+
+        [tool.ty.analysis.names-to-types]
+        user = 'app.models.User'
+    """)
+    c = load(tmp_path)
+    assert c.disabled_rules == frozenset({"pk"})
+    assert c.names_to_types == {"user": ("app.models.User",)}
