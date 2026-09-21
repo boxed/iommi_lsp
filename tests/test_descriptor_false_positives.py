@@ -513,3 +513,111 @@ def test_older_ty_wording_resolves_the_model(analyzer_basic, tmp_path):
         char=len("    return model."),
     )
     assert analyzer_basic.is_false_positive(uri, diag) is True
+
+
+# -- more unused-name shapes -----------------------------------------------
+
+def test_unused_vararg_is_dropped(analyzer_basic, tmp_path):
+    """``def handle(self, *args, **options)`` — the signature is imposed."""
+    src = (
+        "class Command:\n"
+        "    def handle(self, *args, **options):\n"
+        "        return 1\n"
+    )
+    uri = _write(tmp_path, src)
+    line = src.splitlines()[1]
+    for name in ("args", "options"):
+        assert analyzer_basic.is_false_positive(
+            uri,
+            _diag(f"`{name}` is unused", code=None, line=1,
+                  char=line.index(name)),
+        ) is True
+
+
+def test_unused_unpacked_name_is_dropped(analyzer_basic, tmp_path):
+    """You can't leave an element out of a tuple unpacking."""
+    src = (
+        "def f(g):\n"
+        "    text, actions, cost = g()\n"
+        "    return text\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_basic.is_false_positive(
+        uri,
+        _diag("`cost` is unused", code=None, line=1,
+              char=src.splitlines()[1].index("cost")),
+    ) is True
+
+
+def test_unused_plain_local_is_kept(analyzer_basic, tmp_path):
+    src = (
+        "def f(g):\n"
+        "    total = g()\n"
+        "    return 1\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_basic.is_false_positive(
+        uri, _diag("`total` is unused", code=None, line=1, char=4)
+    ) is False
+
+
+# -- attributes on a function object ---------------------------------------
+
+def test_attribute_on_a_decorated_function_is_dropped(analyzer_basic, tmp_path):
+    """``@sync_to_async`` exposes ``.func``; ty sees the bare function."""
+    uri = _write(tmp_path, "x = 1\n")
+    message = (
+        "Object of type `(run_id) -> Coroutine[Any, Any, Unknown]` "
+        "has no attribute `func`"
+    )
+    assert analyzer_basic.is_false_positive(
+        uri, _diag(message, code="unresolved-attribute")
+    ) is True
+
+
+def test_attribute_on_a_non_function_is_kept(analyzer_basic, tmp_path):
+    uri = _write(tmp_path, "x = 1\n")
+    assert analyzer_basic.is_false_positive(
+        uri,
+        _diag(
+            "Object of type `Coroutine[Any, Any, Unknown]` has no attribute `func`",
+            code="unresolved-attribute",
+        ),
+    ) is False
+
+
+# -- unreachable behind a None check on a model ----------------------------
+
+def test_unreachable_behind_a_model_none_check_is_dropped(
+    analyzer_basic, tmp_path
+):
+    """``room = qs.first(); if room is not None: return room`` — to ty the
+    model type excludes None, so the rest of the function is dead."""
+    src = (
+        "from myapp.models import Profile\n"
+        "def f():\n"
+        "    p = Profile.objects.filter(bio='x').first()\n"
+        "    if p is not None:\n"
+        "        return p\n"
+        "    return Profile.objects.create(bio='x')\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_basic.is_false_positive(
+        uri, _diag(UNREACHABLE, code=None, line=5, char=4)
+    ) is True
+
+
+def test_unreachable_behind_a_plain_none_check_is_kept(
+    analyzer_basic, tmp_path
+):
+    src = (
+        "def f(g):\n"
+        "    x = g()\n"
+        "    if x is not None:\n"
+        "        return x\n"
+        "    return 0\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_basic.is_false_positive(
+        uri, _diag(UNREACHABLE, code=None, line=4, char=4)
+    ) is False

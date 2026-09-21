@@ -360,7 +360,8 @@ manager = ["mongo", "search"]            # treat these as Manager-like attrs
 
 Recognised rule groups: `manager`, `meta`, `pk`, `exception`, `fk_id`,
 `reverse`, `generated`, `orm_lookup`, `unused_request_param`,
-`unused_test_param`, `unused_param_in_stub`, `choices_enum`,
+`unused_test_param`, `unused_param_in_stub`, `unused_varargs`,
+`unused_unpacked_name`, `function_attribute`, `choices_enum`,
 `f_operator`, `annotate`, `relation_field_assignment`,
 `scalar_field_assignment`, `field_attribute_assignment`,
 `relation_field_attribute`, `field_operator`, `field_argument_type`,

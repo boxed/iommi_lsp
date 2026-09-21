@@ -52,6 +52,9 @@ RULE_GROUPS: dict[str, frozenset[str]] = {
     "unused_request_param": frozenset(),   # drops ty's "`request` is unused" hint when it's the first param
     "unused_test_param": frozenset(),      # drops ty's "`x` is unused" hint on a parameter of a test function, a pytest fixture, or any callable in a test module
     "unused_param_in_stub": frozenset(),   # drops ty's "`x` is unused" hint on a parameter of a stub body (``...``, ``pass``, ``raise NotImplementedError``)
+    "unused_varargs": frozenset(),         # drops ty's "`x` is unused" hint on a `*args` / `**kwargs` parameter (they exist to absorb, not to be read)
+    "unused_unpacked_name": frozenset(),   # drops ty's "`x` is unused" hint on a name bound by sequence unpacking (you can't leave one out)
+    "function_attribute": frozenset(),     # drops ty's unresolved-attribute when the receiver is a function object (decorators that return a wrapper add attributes ty can't see)
     "choices_enum": frozenset(),           # drops ty's invalid-assignment on IntegerChoices/TextChoices tuple members
     "f_operator": frozenset(),             # drops ty's unsupported-operator on F()/Combinable arithmetic
     "annotate": frozenset(),               # drops ty's unresolved-attribute on annotate()/alias() aliases

@@ -4,7 +4,9 @@
 
 - Attribute access, assignment and arithmetic *through* a Django field no longer warn (the descriptor is invisible to ty)
 - "Code is unreachable" no longer cascades from a guard that narrows on a model field
-- Unused-parameter hints dropped on pytest fixtures/test modules and on stub bodies
+- Unused-name hints dropped on pytest fixtures/test modules, stub bodies, `*args`/`**kwargs`, and names bound by sequence unpacking
+- Attribute access on a function object no longer warns (decorators that return a wrapper — `sync_to_async().func`, `shared_task().delay`)
+- "Code is unreachable" also suppressed behind a `None` check on a model-typed name
 - `id` accepted in ORM lookups on implicit-PK models, and reverse relations accepted by their query name (`job`, not just `job_set`)
 - Module-qualified model references (`import app.models as old; old.Service`) resolve to the right model
 - A class that merely shares a name with an iommi class (locally defined, or imported inside a function) is no longer validated against iommi's refinables

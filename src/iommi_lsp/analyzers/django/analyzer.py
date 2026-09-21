@@ -1019,6 +1019,10 @@ class DjangoAnalyzer:
                 return True
             if kind == "stub" and self.config.is_rule_enabled("unused_param_in_stub"):
                 return True
+            if kind == "varargs" and self.config.is_rule_enabled("unused_varargs"):
+                return True
+            if kind == "unpack" and self.config.is_rule_enabled("unused_unpacked_name"):
+                return True
         if (
             _is_choices_enum_member_assignment(diagnostic)
             and self.config.is_rule_enabled("choices_enum")
@@ -1123,6 +1127,11 @@ class DjangoAnalyzer:
             and self.config.is_rule_enabled("relation_field_attribute")
         ):
             return True
+        if (
+            _is_function_attribute(diagnostic)
+            and self.config.is_rule_enabled("function_attribute")
+        ):
+            return True
         if not _is_unresolved_attribute(diagnostic):
             return False
         try:
@@ -1205,16 +1214,30 @@ class DjangoAnalyzer:
         return guard_line != 0 and guard_line < target.lineno
 
     def _tests_model_field(self, test: ast.AST, tree: ast.Module) -> bool:
-        """True when *test* reads an attribute that is a field on a model.
+        """True when *test* narrows on something ty mistypes as a model.
 
-        Falls back to the workspace-wide set of field names when the
-        receiver doesn't resolve — ``closed_out = other.chain.actions
-        .order_by('pk').last()`` is beyond our flow analysis, but
-        ``closed_out.accepted_time is None`` is still the narrowing that
-        greyed out the rest of the function. That's a coarse test, and it
-        only ever suppresses an unreachable-code *hint*.
+        Two shapes, both of which make ty take one branch unconditionally
+        and grey out everything after it:
+
+        * an attribute that is a field on a model — ``if
+          option.rejected_time is not None:`` reads as a test on a
+          ``DateTimeField`` class object, which is never ``None``;
+        * a ``None`` comparison on a name ty believes is a model
+          instance — ``room = qs.first(); if room is not None: return
+          room`` — since the model type itself excludes ``None``.
+
+        The attribute case falls back to the workspace-wide set of field
+        names when the receiver doesn't resolve: ``closed_out =
+        other.chain.actions.order_by('pk').last()`` is beyond our flow
+        analysis, but ``closed_out.accepted_time is None`` is still the
+        narrowing that greyed out the rest of the function. That's a
+        coarse test, and it only ever suppresses an unreachable *hint*.
         """
         for node in ast.walk(test):
+            if isinstance(node, ast.Compare) and self._compares_model_to_none(
+                node, tree
+            ):
+                return True
             if not isinstance(node, ast.Attribute):
                 continue
             models = self._candidate_models(node.value, tree)
@@ -1223,6 +1246,27 @@ class DjangoAnalyzer:
                     return True
                 continue
             if node.attr in self.django_index.field_names:
+                return True
+        return False
+
+    def _compares_model_to_none(
+        self, node: ast.Compare, tree: ast.Module
+    ) -> bool:
+        """``<model-typed name> is None`` (or ``is not`` / ``==`` / ``!=``)."""
+        if not all(
+            isinstance(op, (ast.Is, ast.IsNot, ast.Eq, ast.NotEq))
+            for op in node.ops
+        ):
+            return False
+        operands = [node.left, *node.comparators]
+        if not any(
+            isinstance(o, ast.Constant) and o.value is None for o in operands
+        ):
+            return False
+        for operand in operands:
+            if isinstance(operand, ast.Constant):
+                continue
+            if self._candidate_models(operand, tree):
                 return True
         return False
 
@@ -1443,12 +1487,18 @@ class DjangoAnalyzer:
         start = (diagnostic.get("range") or {}).get("start") or {}
         line_no = int(start.get("line", 0)) + 1
         col = int(start.get("character", 0))
-        node = _param_owner_index(parsed.tree).get((line_no, col))
-        if node is None:
+        owner, is_vararg = _param_owner_index(parsed.tree).get(
+            (line_no, col), (None, False)
+        )
+        if owner is None:
+            if (line_no, col) in _unpacked_target_index(parsed.tree):
+                return "unpack"
             return None
-        if _is_test_module(path) or _is_pytest_function(node):
+        if is_vararg:
+            return "varargs"
+        if _is_test_module(path) or _is_pytest_function(owner):
             return "test"
-        if _is_stub_body(node):
+        if _is_stub_body(owner):
             return "stub"
         return None
 
@@ -2437,6 +2487,18 @@ def _find_op_at(tree: ast.Module, range_: dict) -> ast.AST | None:
 _TY_TYPE_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
 
 
+def _receiver_type_raw(message: str) -> list[str]:
+    """The receiver type ty blamed, as written (one entry per spelling)."""
+    out: list[str] = []
+    union = _TY_UNION_ATTR_RE.search(message)
+    if union is not None:
+        out.append(union.group(1))
+    m = _TY_RECEIVER_TYPE_RE.search(message)
+    if m is not None:
+        out.append(_ty_receiver_type_name(m))
+    return out
+
+
 def _receiver_type_arms(message: str) -> list[str]:
     """Type names ty blamed for a failed attribute access.
 
@@ -2453,6 +2515,31 @@ def _receiver_type_arms(message: str) -> list[str]:
             return []
         raw = _ty_receiver_type_name(m)
     return _TY_TYPE_TOKEN_RE.findall(raw)
+
+
+# ``Object of type `(run_id) -> Coroutine[Any, Any, Unknown]` has no
+# attribute `func``` — the receiver is a function, printed as a signature.
+_TY_CALLABLE_TYPE_RE = re.compile(r"^\(.*\) -> ")
+
+
+def _is_function_attribute(diagnostic: Diagnostic) -> bool:
+    """Match ty's ``unresolved-attribute`` on a function object.
+
+    Decorators that return a wrapper — ``sync_to_async`` (``.func``),
+    Celery's ``shared_task`` (``.delay``, ``.retry``), Django's own
+    ``admin.action`` (``.short_description``) — hand back an object with
+    attributes the bare function doesn't have. When ty types the name as
+    the undecorated function it reports every one of them as missing.
+    """
+    if not _is_unresolved_attribute(diagnostic):
+        return False
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return False
+    return any(
+        _TY_CALLABLE_TYPE_RE.match(arm)
+        for arm in _receiver_type_raw(message)
+    )
 
 
 def _is_relation_field_receiver(diagnostic: Diagnostic) -> bool:
@@ -2857,8 +2944,10 @@ _NARROWING_CACHE_ATTR = "_iommi_lsp_field_narrowing"
 _PARAM_OWNER_INDEX_ATTR = "_iommi_lsp_param_owners"
 
 
-def _param_owner_index(tree: ast.Module) -> dict[tuple[int, int], ast.AST]:
-    """``(line, col)`` of every parameter → the callable declaring it.
+def _param_owner_index(
+    tree: ast.Module,
+) -> dict[tuple[int, int], tuple[ast.AST, bool]]:
+    """``(line, col)`` of every parameter → ``(callable, is_vararg)``.
 
     Cached on the parsed tree: the unused-parameter filter asks this once
     per diagnostic, and ty emits one per parameter.
@@ -2866,22 +2955,65 @@ def _param_owner_index(tree: ast.Module) -> dict[tuple[int, int], ast.AST]:
     cached = getattr(tree, _PARAM_OWNER_INDEX_ATTR, None)
     if cached is not None:
         return cached
-    out: dict[tuple[int, int], ast.AST] = {}
+    out: dict[tuple[int, int], tuple[ast.AST, bool]] = {}
     for node in ast.walk(tree):
         if not isinstance(
             node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
         ):
             continue
         args = node.args
-        params = list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)
-        if args.vararg is not None:
-            params.append(args.vararg)
-        if args.kwarg is not None:
-            params.append(args.kwarg)
-        for p in params:
-            out.setdefault((p.lineno, p.col_offset), node)
+        named = list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)
+        starred = [a for a in (args.vararg, args.kwarg) if a is not None]
+        for p in named:
+            out.setdefault((p.lineno, p.col_offset), (node, False))
+        for p in starred:
+            out.setdefault((p.lineno, p.col_offset), (node, True))
     try:
         setattr(tree, _PARAM_OWNER_INDEX_ATTR, out)
+    except (AttributeError, TypeError):
+        pass
+    return out
+
+
+_UNPACKED_TARGET_INDEX_ATTR = "_iommi_lsp_unpacked_targets"
+
+
+def _unpacked_target_index(tree: ast.Module) -> set[tuple[int, int]]:
+    """``(line, col)`` of every name bound by unpacking a sequence.
+
+    ``text, actions, tokens_in, tokens_out, cost = f()`` — you can't drop
+    the elements you don't need, so "unused" says nothing the author can
+    act on. Standard Python linters skip these for the same reason.
+    """
+    cached = getattr(tree, _UNPACKED_TARGET_INDEX_ATTR, None)
+    if cached is not None:
+        return cached
+    out: set[tuple[int, int]] = set()
+
+    def collect(target: ast.AST) -> None:
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                mark(elt)
+
+    def mark(node: ast.AST) -> None:
+        if isinstance(node, ast.Name):
+            out.add((node.lineno, node.col_offset))
+        elif isinstance(node, ast.Starred):
+            mark(node.value)
+        elif isinstance(node, (ast.Tuple, ast.List)):
+            for elt in node.elts:
+                mark(elt)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                collect(target)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            collect(node.target)
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            collect(node.optional_vars)
+    try:
+        setattr(tree, _UNPACKED_TARGET_INDEX_ATTR, out)
     except (AttributeError, TypeError):
         pass
     return out
