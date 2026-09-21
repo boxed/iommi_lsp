@@ -276,6 +276,15 @@ class DjangoAnalyzer:
         if msg_model is not None and self._attr_is_magic(msg_model, attr_name):
             return True
 
+        # Ambiguous-name fallback: ty named a type (e.g. ``Material``) that
+        # matches more than one workspace model, so ``_resolve_via_message``
+        # gave up. Suppress when every same-named model treats the attr as
+        # magic — the access is valid whichever one ty meant.
+        if self._message_type_is_magic_on_all_models(
+            diagnostic.get("message"), attr_name
+        ):
+            return True
+
         # ``Self``-typed receiver inside a method whose class is (or is a
         # mixin/base of) a model. ty types these as ``Self@<method>`` —
         # covering ``self`` directly *and* locals like ``result =
@@ -622,8 +631,8 @@ class DjangoAnalyzer:
                     last_match = model
         return last_match
 
-    def _resolve_via_message(self, message: object) -> ModelInfo | None:
-        """Resolve a model from the inferred type ty named in its message.
+    def _receiver_type_name_from_message(self, message: object) -> str | None:
+        """Simple class name ty named as the receiver type, or ``None``.
 
         ty-semantic emits ``Object of type `Project` has no attribute `id```
         even for receivers we can't reach from the AST (decorator-wrapped
@@ -632,9 +641,7 @@ class DjangoAnalyzer:
         ty only partially infers the receiver and reports against one arm of
         a union: ``Attribute `actions` is not defined on `ActionChain` in
         union `Unknown | ActionChain```. The arm ty checked against (here
-        ``ActionChain``) is the receiver type we care about. We treat the
-        named type as a model when ``django_index`` recognises it; an
-        unknown name falls through and the diagnostic is kept.
+        ``ActionChain``) is the receiver type we care about.
         """
         if not isinstance(message, str):
             return None
@@ -654,7 +661,48 @@ class DjangoAnalyzer:
         bracket = tail.find("[")
         if bracket != -1:
             tail = tail[:bracket]
+        return tail
+
+    def _resolve_via_message(self, message: object) -> ModelInfo | None:
+        """Resolve a model from the inferred type ty named in its message.
+
+        We treat the named type as a model when ``django_index`` recognises
+        it; an unknown (or ambiguous) name falls through and the diagnostic
+        is kept — see :meth:`_message_type_is_magic_on_all_models` for the
+        ambiguous-name fallback.
+        """
+        tail = self._receiver_type_name_from_message(message)
+        if tail is None:
+            return None
         return self._lookup(tail)
+
+    def _message_type_is_magic_on_all_models(
+        self, message: object, attr_name: str
+    ) -> bool:
+        """Ambiguous-name fallback for the message-based resolver.
+
+        When ty names a receiver type whose simple name matches more than
+        one workspace model (e.g. two ``Material`` models in different
+        apps), ``_lookup`` can't disambiguate and ``_resolve_via_message``
+        returns ``None``. But if *every* model sharing that name treats
+        ``attr_name`` as Django magic, the access is valid whichever one ty
+        inferred — so we can safely suppress. Biased toward false negatives:
+        a single disagreeing candidate keeps the diagnostic.
+        """
+        tail = self._receiver_type_name_from_message(message)
+        if tail is None:
+            return False
+        candidates = [
+            self.django_index.models[q]
+            for q in self.django_index.by_simple_name.get(tail, ())
+            if q in self.django_index.models
+        ]
+        # 0 → unknown type; 1 → ``_lookup`` already resolved it (handled by
+        # the ``_resolve_via_message`` path). Only the 2+ ambiguous case
+        # reaches here with something to decide.
+        if len(candidates) < 2:
+            return False
+        return all(self._attr_is_magic(m, attr_name) for m in candidates)
 
     def _model_from_annotation(self, ann: ast.AST | None) -> ModelInfo | None:
         if ann is None:

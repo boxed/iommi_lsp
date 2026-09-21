@@ -917,6 +917,102 @@ def test_message_based_fallback_keeps_diagnostic_for_unknown_type(tmp_path: Path
     assert a.is_false_positive(f.as_uri(), diag) is False
 
 
+def _two_apps_sharing_model_name(tmp_path: Path, *, second_has_fk: bool) -> Path:
+    """Workspace with two apps each defining a ``Material`` model. The
+    first always declares a ``unit`` ForeignKey; the second does so only
+    when *second_has_fk*. Returns the workspace root.
+    """
+    core = tmp_path / "core"
+    prospects = tmp_path / "prospects"
+    core.mkdir()
+    prospects.mkdir()
+    (core / "__init__.py").write_text("")
+    (prospects / "__init__.py").write_text("")
+    (core / "models.py").write_text(
+        "from django.db import models\n"
+        "class Unit(models.Model):\n"
+        "    name = models.CharField(max_length=10)\n"
+        "class Material(models.Model):\n"
+        "    unit = models.ForeignKey(Unit, on_delete=models.CASCADE, related_name='+')\n"
+    )
+    second_fk = (
+        "    unit = models.ForeignKey('core.models.Unit', on_delete=models.CASCADE, related_name='+')\n"
+        if second_has_fk
+        else "    name = models.CharField(max_length=10)\n"
+    )
+    (prospects / "models.py").write_text(
+        "from django.db import models\n"
+        "class Material(models.Model):\n"
+        + second_fk
+    )
+    return tmp_path
+
+
+def test_ambiguous_model_name_fk_id_suppressed_when_all_agree(tmp_path: Path):
+    """Two apps define a ``Material`` model, both with a ``unit`` FK. A
+    receiver ty types as ``Material`` (e.g. ``material_price.material``)
+    can't be disambiguated by ``_lookup``, but ``unit_id`` is valid on
+    *both* models — so ``material.unit_id`` must be suppressed.
+    """
+    root = _two_apps_sharing_model_name(tmp_path, second_has_fk=True)
+    src = (
+        "def port(material_price):\n"
+        "    material = material_price.material\n"
+        "    return material.unit_id\n"
+    )
+    f = tmp_path / "porting.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=root)
+    a.django_index = build_index(root)
+
+    line = 2
+    start = src.splitlines()[line].index("material.unit_id")
+    diag = {
+        "code": "unresolved-attribute",
+        "message": "Object of type `Material` has no attribute `unit_id`",
+        "range": {
+            "start": {"line": line, "character": start},
+            "end": {"line": line, "character": start + len("material.unit_id")},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_ambiguous_model_name_fk_id_kept_when_one_disagrees(tmp_path: Path):
+    """If only one of the same-named models has the ``unit`` FK, we can't
+    be sure ty meant that one — keep the diagnostic (bias toward FN means
+    we still surface a genuine typo on the FK-less model).
+    """
+    root = _two_apps_sharing_model_name(tmp_path, second_has_fk=False)
+    src = (
+        "def port(material_price):\n"
+        "    material = material_price.material\n"
+        "    return material.unit_id\n"
+    )
+    f = tmp_path / "porting.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=root)
+    a.django_index = build_index(root)
+
+    line = 2
+    start = src.splitlines()[line].index("material.unit_id")
+    diag = {
+        "code": "unresolved-attribute",
+        "message": "Object of type `Material` has no attribute `unit_id`",
+        "range": {
+            "start": {"line": line, "character": start},
+            "end": {"line": line, "character": start + len("material.unit_id")},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
 def test_message_based_fallback_handles_legacy_quoted_format(tmp_path: Path):
     """Older ty variants spelled the type ``Type "User" has no attribute
     "id"``. Same receiver shape, same expected outcome.
