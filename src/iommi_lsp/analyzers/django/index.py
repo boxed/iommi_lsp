@@ -435,7 +435,57 @@ def _scrape_file(
             )
         )
 
+    # The scrape outlives the parse (``DjangoAnalyzer._scrapes`` keeps every
+    # file's for incremental reassembly), and a ClassDef holds its whole body
+    # — every method, every migration's ``operations`` list. On a real
+    # workspace that was ~130 MB of retained AST per LSP process.
+    for raw in classes:
+        _slim_class_node(raw.node)
+
     return _FileScrape(module=module, file_path=path, classes=classes, imports=imports)
+
+
+# Field kwargs ``_populate_fields`` inspects; every other kwarg is dropped.
+_FIELD_KWARGS_READ = frozenset({"primary_key", "related_name", "choices"})
+
+
+def _slim_class_node(class_node: ast.ClassDef) -> None:
+    """Prune *class_node* in place down to what index assembly reads.
+
+    That is: ``name = Call(...)`` field declarations (the callee, the first
+    positional arg and the kwargs in ``_FIELD_KWARGS_READ`` —
+    ``_populate_fields``), the ``Meta`` inner class's assignments
+    (``_extract_meta``) and method *names* (``_collect_queryset_method_names``).
+    Nested classes needn't survive here: ``_scrape_file`` gives each its own
+    ``_RawClass``. Widen this when assembly starts reading something new.
+    """
+    kept: list[ast.stmt] = []
+    for stmt in class_node.body:
+        if class_node.name == "Meta" and isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            # ``Meta`` is a ``_RawClass`` of its own (``ast.walk`` reaches
+            # it), but its parent's ``_extract_meta`` reads it whole.
+            kept.append(stmt)
+        elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            stmt.body = [ast.Pass()]
+            stmt.decorator_list = []
+            stmt.args = ast.arguments(
+                posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[],
+            )
+            stmt.returns = None
+            kept.append(stmt)
+        elif (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and isinstance(stmt.value, ast.Call)
+        ):
+            call = stmt.value
+            call.args = call.args[:1]
+            call.keywords = [kw for kw in call.keywords if kw.arg in _FIELD_KWARGS_READ]
+            kept.append(stmt)
+        elif isinstance(stmt, ast.ClassDef) and stmt.name == "Meta":
+            kept.append(stmt)
+    class_node.body = kept or [ast.Pass()]
 
 
 # ---------------------------------------------------------------------------

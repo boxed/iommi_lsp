@@ -140,7 +140,6 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
         return 2
 
     root = workspace or Path.cwd()
-    documents = DocumentStore()
     # One AST per (uri, source) shared across analyzers. Without this,
     # ty's publishDiagnostics frame triggers each analyzer's
     # is_false_positive on every diagnostic; analyzers that re-parsed the
@@ -148,6 +147,7 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
     # 10k-line files.
     parse_cache = ParseCache()
     parse_provider = parse_cache.get
+    documents = DocumentStore(on_close=parse_cache.invalidate)
     django_analyzer = DjangoAnalyzer(
         workspace_root=root, text_provider=documents.get,
         parse_provider=parse_provider,

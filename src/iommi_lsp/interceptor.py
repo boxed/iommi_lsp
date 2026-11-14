@@ -54,8 +54,9 @@ class DocumentStore:
     to read from this store, not from disk.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, on_close: Callable[[str], None] | None = None) -> None:
         self._docs: dict[str, str] = {}
+        self._on_close = on_close
 
     def get(self, uri: str) -> str | None:
         return self._docs.get(uri)
@@ -81,6 +82,8 @@ class DocumentStore:
 
     def did_close(self, uri: str) -> None:
         self._docs.pop(uri, None)
+        if self._on_close is not None:
+            self._on_close(uri)
 
 
 def _apply_incremental_change(text: str, change: dict) -> str:
