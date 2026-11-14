@@ -18,6 +18,7 @@ suppress a real bug.
 from __future__ import annotations
 
 import ast
+import asyncio
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -169,7 +170,12 @@ class DjangoAnalyzer:
 
         self.workspace_root = workspace_root
         self.config = load_config(workspace_root)
-        self._scrapes = collect_scrapes(workspace_root)
+        # The full-workspace parse is the one slow step (~5 s on a large
+        # project) and touches nothing shared, so it runs off the event
+        # loop: the proxy keeps forwarding frames — for this workspace and
+        # any other one this process serves — while it does.
+        scrapes = await asyncio.to_thread(collect_scrapes, workspace_root)
+        self._scrapes = scrapes
         self.django_index = assemble_index(workspace_root, self._scrapes)
         self._cache.clear()
         _log.info(

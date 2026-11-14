@@ -42,6 +42,8 @@ COMPLETION = "textDocument/completion"
 DEFINITION = "textDocument/definition"
 CODE_ACTION = "textDocument/codeAction"
 CANCEL_REQUEST = "$/cancelRequest"
+DID_CHANGE_WORKSPACE_FOLDERS = "workspace/didChangeWorkspaceFolders"
+WORKSPACE_CONFIGURATION = "workspace/configuration"
 
 
 class DocumentStore:
@@ -978,23 +980,33 @@ WorkspaceCallback = Callable[[Path], Awaitable[None]]
 ChangeCallback = Callable[[str], Awaitable[None]]
 
 
-def _workspace_root_from_initialize(payload: dict) -> Path | None:
-    params = payload.get("params") or {}
-    folders = params.get("workspaceFolders")
-    if isinstance(folders, list) and folders:
-        first = folders[0]
-        uri = (first or {}).get("uri") if isinstance(first, dict) else None
+def _folder_paths(folders: Any) -> list[Path]:
+    """File paths of a ``WorkspaceFolder[]``, skipping non-file URIs."""
+    out: list[Path] = []
+    if not isinstance(folders, list):
+        return out
+    for folder in folders:
+        uri = folder.get("uri") if isinstance(folder, dict) else None
         path = _file_uri_to_path(uri)
-        if path is not None:
-            return path
-    root_uri = params.get("rootUri")
-    path = _file_uri_to_path(root_uri)
+        if path is not None and path not in out:
+            out.append(path)
+    return out
+
+
+def _workspace_roots_from_initialize(payload: dict) -> list[Path]:
+    """Every workspace folder ``initialize`` names, falling back to the
+    deprecated single-root ``rootUri`` / ``rootPath``."""
+    params = payload.get("params") or {}
+    roots = _folder_paths(params.get("workspaceFolders"))
+    if roots:
+        return roots
+    path = _file_uri_to_path(params.get("rootUri"))
     if path is not None:
-        return path
+        return [path]
     root_path = params.get("rootPath")
     if isinstance(root_path, str) and root_path:
-        return Path(root_path)
-    return None
+        return [Path(root_path)]
+    return []
 
 
 def _file_uri_to_path(uri: Any) -> Path | None:
@@ -1020,10 +1032,12 @@ class EditorRequestSniffer:
         self,
         *,
         on_workspace: WorkspaceCallback | None = None,
+        on_workspace_removed: Callable[[Path], None] | None = None,
         on_file_changed: ChangeCallback | None = None,
         document_store: DocumentStore | None = None,
     ) -> None:
         self._on_workspace = on_workspace
+        self._on_workspace_removed = on_workspace_removed
         self._on_file_changed = on_file_changed
         self._document_store = document_store
         self._workspace_seen = False
@@ -1040,10 +1054,13 @@ class EditorRequestSniffer:
             return body
         method = payload.get("method")
         if method == INITIALIZE and not self._workspace_seen and self._on_workspace:
-            root = _workspace_root_from_initialize(payload)
-            if root is not None:
+            roots = _workspace_roots_from_initialize(payload)
+            if roots:
                 self._workspace_seen = True
-                self._spawn(self._on_workspace(root))
+                for root in roots:
+                    self._spawn(self._on_workspace(root))
+        elif method == DID_CHANGE_WORKSPACE_FOLDERS:
+            self._handle_workspace_folders(payload)
         elif method == DID_OPEN:
             self._handle_did_open(payload)
         elif method == DID_CHANGE:
@@ -1056,6 +1073,15 @@ class EditorRequestSniffer:
             if uri:
                 self._spawn(self._on_file_changed(uri))
         return body
+
+    def _handle_workspace_folders(self, payload: dict) -> None:
+        event = (payload.get("params") or {}).get("event") or {}
+        if self._on_workspace_removed is not None:
+            for root in _folder_paths(event.get("removed")):
+                self._on_workspace_removed(root)
+        if self._on_workspace is not None:
+            for root in _folder_paths(event.get("added")):
+                self._spawn(self._on_workspace(root))
 
     def _handle_did_open(self, payload: dict) -> None:
         params = payload.get("params") or {}
@@ -1104,3 +1130,85 @@ async def _swallow(coro: Awaitable[None]) -> None:
         await coro
     except Exception:
         _log.exception("background sniffer callback failed")
+
+
+class WorkspaceConfigAugmenter:
+    """Tells ty which virtualenv each workspace folder uses.
+
+    ty asks the editor for each folder's settings with a
+    ``workspace/configuration`` request (one item per folder, ``scopeUri``
+    = the folder). This hook remembers those requests on the way out
+    (:meth:`on_server_message`, ty → editor) and, when the editor's
+    answer comes back (:meth:`on_editor_message`, editor → ty), adds the
+    folder's ``.venv`` / ``venv`` as the editor-selected interpreter —
+    the ``pythonExtension.activeEnvironment`` ty's VS Code extension
+    sends.
+
+    That is what makes one ty process right for several projects: the
+    ``VIRTUAL_ENV`` the backend was spawned with is one value for the
+    whole process, but ty uses the editor-selected interpreter as each
+    workspace's ``environment.python`` unless that workspace's own
+    config sets one. An editor that already sends ``pythonExtension``
+    keeps its choice.
+    """
+
+    def __init__(self, venv_for: Callable[[Path], Path | None]) -> None:
+        self._venv_for = venv_for
+        # Outstanding ty → editor configuration requests: id → scope paths.
+        self._pending: dict[Any, list[Path | None]] = {}
+
+    async def on_server_message(self, body: bytes) -> bytes | None:
+        if b'"workspace/configuration"' not in body:
+            return body
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return body
+        if not isinstance(payload, dict) or payload.get("method") != WORKSPACE_CONFIGURATION:
+            return body
+        msg_id = payload.get("id")
+        items = (payload.get("params") or {}).get("items")
+        if msg_id is None or not isinstance(items, list):
+            return body
+        self._pending[msg_id] = [
+            _file_uri_to_path(item.get("scopeUri"))
+            if isinstance(item, dict) and item.get("section") == "ty" else None
+            for item in items
+        ]
+        return body
+
+    async def on_editor_message(self, body: bytes) -> bytes | None:
+        # Pending only between ty asking and the editor answering, so this
+        # parse runs on a handful of frames per workspace, not per keystroke.
+        if not self._pending:
+            return body
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return body
+        if not isinstance(payload, dict) or "method" in payload:
+            return body
+        scopes = self._pending.pop(payload.get("id"), None)
+        result = payload.get("result")
+        if scopes is None or not isinstance(result, list) or len(result) != len(scopes):
+            return body
+        changed = False
+        for i, scope in enumerate(scopes):
+            if scope is None:
+                continue
+            venv = self._venv_for(scope)
+            value = result[i]
+            if venv is None or not (value is None or isinstance(value, dict)):
+                continue
+            value = dict(value or {})
+            if "pythonExtension" in value:
+                continue
+            value["pythonExtension"] = {
+                "activeEnvironment": {"executable": {"sysPrefix": str(venv)}},
+            }
+            result[i] = value
+            changed = True
+            _log.info("workspace %s: using interpreter %s", scope, venv)
+        if not changed:
+            return body
+        return json.dumps(payload).encode("utf-8")

@@ -40,7 +40,9 @@ from .interceptor import (
     DiagnosticInterceptor,
     DocumentStore,
     EditorRequestSniffer,
+    WorkspaceConfigAugmenter,
 )
+from .workspaces import WorkspaceSet, workspace_venv
 
 
 _log = log.get("cli")
@@ -130,6 +132,89 @@ def _resolve_ty_binary() -> str:
     )
 
 
+# Bundle slot order. Order matters for completion latency: ``_gather`` stops
+# at the first ``exclusive=True`` analyzer, so put the ones that are cheapest
+# *and* most likely to claim first.
+# - urls: ~0.2 ms (no ast.parse); bails immediately when the position
+#   isn't inside a ``reverse``-style call. Specific and very common,
+#   so first.
+# - templates: ~0.1 ms; bails immediately when the partial has no ``/``.
+# - settings: ~14 ms on a 1k-line buffer (it ast.parses the whole file
+#   to figure out the enclosing assignment), so it's gated to settings-
+#   style filenames internally — but we still place it after urls so
+#   ``reverse('|')`` in a settings file short-circuits before settings
+#   gets a chance to parse.
+# - iommi / django each cost ~0.7 ms in normal files because they parse
+#   the whole buffer to decide whether they own the position.
+ANALYZER_CLASSES = (
+    UrlAnalyzer, TemplateAnalyzer, SettingsAnalyzer,
+    AdminAnalyzer, FormsAnalyzer, ViewsAnalyzer,
+    SignalsAnalyzer, MigrationsAnalyzer,
+    IommiAnalyzer, DjangoAnalyzer,
+)
+
+
+def _build_analyzers(root: Path, text_provider, parse_provider) -> list:
+    """One workspace's analyzer bundle, in ``ANALYZER_CLASSES`` order."""
+    django_analyzer = DjangoAnalyzer(
+        workspace_root=root, text_provider=text_provider,
+        parse_provider=parse_provider,
+    )
+    django_index = lambda: django_analyzer.django_index  # noqa: E731
+    iommi_analyzer = IommiAnalyzer(
+        workspace_root=root,
+        text_provider=text_provider,
+        # Lets the iommi analyzer offer ``columns__<model_field>``
+        # completions when the call carries ``auto__model=Model``.
+        django_index_provider=django_index,
+        parse_provider=parse_provider,
+    )
+    url_analyzer = UrlAnalyzer(
+        workspace_root=root, text_provider=text_provider,
+        parse_provider=parse_provider,
+    )
+    bundle = [
+        url_analyzer,
+        TemplateAnalyzer(
+            workspace_root=root,
+            text_provider=text_provider,
+            # ``{% url %}`` completion + diagnostics in HTML templates draw
+            # on the workspace URL index.
+            url_index_provider=lambda: url_analyzer.url_index,
+        ),
+        SettingsAnalyzer(
+            workspace_root=root,
+            text_provider=text_provider,
+            # AUTH_USER_MODEL completion draws on workspace models.
+            django_index_provider=django_index,
+        ),
+        AdminAnalyzer(
+            workspace_root=root, text_provider=text_provider,
+            django_index_provider=django_index, parse_provider=parse_provider,
+        ),
+        FormsAnalyzer(
+            workspace_root=root, text_provider=text_provider,
+            django_index_provider=django_index, parse_provider=parse_provider,
+        ),
+        ViewsAnalyzer(
+            workspace_root=root, text_provider=text_provider,
+            django_index_provider=django_index, parse_provider=parse_provider,
+        ),
+        SignalsAnalyzer(
+            workspace_root=root, text_provider=text_provider,
+            django_index_provider=django_index,
+        ),
+        MigrationsAnalyzer(
+            workspace_root=root, text_provider=text_provider,
+            parse_provider=parse_provider,
+        ),
+        iommi_analyzer,
+        django_analyzer,
+    ]
+    assert tuple(type(a) for a in bundle) == ANALYZER_CLASSES
+    return bundle
+
+
 def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
     if ty_command_str is None:
         ty_command = [_resolve_ty_binary(), "server"]
@@ -144,86 +229,15 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
     # ty's publishDiagnostics frame triggers each analyzer's
     # is_false_positive on every diagnostic; analyzers that re-parsed the
     # buffer per call multiplied that into seconds of dead time on
-    # 10k-line files.
+    # 10k-line files. Keyed by URI, so one cache serves every workspace.
     parse_cache = ParseCache()
-    parse_provider = parse_cache.get
     documents = DocumentStore(on_close=parse_cache.invalidate)
-    django_analyzer = DjangoAnalyzer(
-        workspace_root=root, text_provider=documents.get,
-        parse_provider=parse_provider,
+    # One analyzer bundle per workspace folder, so one process (and one
+    # ty) can serve several projects; see ``workspaces``.
+    workspaces = WorkspaceSet(
+        lambda r: _build_analyzers(r, documents.get, parse_cache.get),
     )
-    iommi_analyzer = IommiAnalyzer(
-        workspace_root=root,
-        text_provider=documents.get,
-        # Lets the iommi analyzer offer ``columns__<model_field>``
-        # completions when the call carries ``auto__model=Model``.
-        django_index_provider=lambda: django_analyzer.django_index,
-        parse_provider=parse_provider,
-    )
-    url_analyzer = UrlAnalyzer(
-        workspace_root=root, text_provider=documents.get,
-        parse_provider=parse_provider,
-    )
-    template_analyzer = TemplateAnalyzer(
-        workspace_root=root,
-        text_provider=documents.get,
-        # ``{% url %}`` completion + diagnostics in HTML templates draw
-        # on the workspace URL index.
-        url_index_provider=lambda: url_analyzer.url_index,
-    )
-    settings_analyzer = SettingsAnalyzer(
-        workspace_root=root,
-        text_provider=documents.get,
-        # AUTH_USER_MODEL completion draws on workspace models.
-        django_index_provider=lambda: django_analyzer.django_index,
-    )
-    admin_analyzer = AdminAnalyzer(
-        workspace_root=root,
-        text_provider=documents.get,
-        django_index_provider=lambda: django_analyzer.django_index,
-        parse_provider=parse_provider,
-    )
-    forms_analyzer = FormsAnalyzer(
-        workspace_root=root,
-        text_provider=documents.get,
-        django_index_provider=lambda: django_analyzer.django_index,
-        parse_provider=parse_provider,
-    )
-    views_analyzer = ViewsAnalyzer(
-        workspace_root=root,
-        text_provider=documents.get,
-        django_index_provider=lambda: django_analyzer.django_index,
-        parse_provider=parse_provider,
-    )
-    signals_analyzer = SignalsAnalyzer(
-        workspace_root=root,
-        text_provider=documents.get,
-        django_index_provider=lambda: django_analyzer.django_index,
-    )
-    migrations_analyzer = MigrationsAnalyzer(
-        workspace_root=root, text_provider=documents.get,
-        parse_provider=parse_provider,
-    )
-    # Order matters for completion latency: ``_gather`` stops at the first
-    # ``exclusive=True`` analyzer, so put the ones that are cheapest *and*
-    # most likely to claim first.
-    # - urls: ~0.2 ms (no ast.parse); bails immediately when the position
-    #   isn't inside a ``reverse``-style call. Specific and very common,
-    #   so first.
-    # - templates: ~0.1 ms; bails immediately when the partial has no ``/``.
-    # - settings: ~14 ms on a 1k-line buffer (it ast.parses the whole file
-    #   to figure out the enclosing assignment), so it's gated to settings-
-    #   style filenames internally — but we still place it after urls so
-    #   ``reverse('|')`` in a settings file short-circuits before settings
-    #   gets a chance to parse.
-    # - iommi / django each cost ~0.7 ms in normal files because they parse
-    #   the whole buffer to decide whether they own the position.
-    analyzers = [
-        url_analyzer, template_analyzer, settings_analyzer,
-        admin_analyzer, forms_analyzer, views_analyzer,
-        signals_analyzer, migrations_analyzer,
-        iommi_analyzer, django_analyzer,
-    ]
+    analyzers = workspaces.routed(ANALYZER_CLASSES)
 
     interceptor = DiagnosticInterceptor(analyzers=analyzers)
     matchmaker = CompletionMatchmaker(
@@ -231,28 +245,28 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
     )
     definition_router = DefinitionRouter(analyzers=analyzers)
     code_action_router = CodeActionRouter(analyzers=analyzers)
-
-    async def workspace_seen(root: Path) -> None:
-        for a in analyzers:
-            await a.index(root)
+    config_augmenter = WorkspaceConfigAugmenter(venv_for=workspace_venv)
 
     async def file_changed(uri: str) -> None:
         for a in analyzers:
             await a.on_file_changed(uri)
 
     sniffer = EditorRequestSniffer(
-        on_workspace=workspace_seen,
+        on_workspace=workspaces.add,
+        on_workspace_removed=workspaces.remove,
         on_file_changed=file_changed,
         document_store=documents,
     )
 
     editor_to_ty = _chain_hooks(
-        sniffer, matchmaker.on_request, definition_router.on_request,
-        code_action_router.on_request, interceptor.on_request,
+        sniffer, config_augmenter.on_editor_message, matchmaker.on_request,
+        definition_router.on_request, code_action_router.on_request,
+        interceptor.on_request,
     )
     ty_to_editor = _chain_hooks(
-        matchmaker.on_response, definition_router.on_response,
-        code_action_router.on_response, interceptor,
+        config_augmenter.on_server_message, matchmaker.on_response,
+        definition_router.on_response, code_action_router.on_response,
+        interceptor,
     )
 
     backend_env = _backend_env(root, os.environ)
