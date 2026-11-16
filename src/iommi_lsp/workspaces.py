@@ -14,6 +14,13 @@ A URI under no workspace folder (a library file in ``site-packages``
 outside the project, an untitled buffer) goes to the *primary* bundle —
 the earliest still-open folder — which is what the single-root proxy
 always did.
+
+A folder is *ready* once every analyzer in its bundle has indexed it.
+Indexing runs off the event loop, so ty can publish diagnostics for a
+file before its folder is ready — filtered against an empty index,
+every Django false positive would get through. The diagnostic
+interceptor asks :meth:`WorkspaceSet.is_ready` and holds such frames
+until the ready listeners fire.
 """
 
 from __future__ import annotations
@@ -65,7 +72,11 @@ class WorkspaceSet:
         self._by_depth: list[Path] = []
         # Last lookup: one publishDiagnostics fans out to every slot for
         # every diagnostic, all for the same URI.
-        self._last: tuple[str, list[Analyzer] | None] | None = None
+        self._last: tuple[str, Path | None] | None = None
+        # Roots whose whole bundle has finished indexing.
+        self._ready: set[Path] = set()
+        # Called whenever readiness may have changed for some URI.
+        self._listeners: list[Callable[[], None]] = []
 
     @property
     def roots(self) -> list[Path]:
@@ -73,6 +84,16 @@ class WorkspaceSet:
 
     def __contains__(self, root: Path) -> bool:
         return root in self._bundles
+
+    def on_readiness_change(self, listener: Callable[[], None]) -> None:
+        self._listeners.append(listener)
+
+    def _notify(self) -> None:
+        for listener in self._listeners:
+            try:
+                listener()
+            except Exception:
+                _log.exception("readiness listener failed")
 
     async def add(self, root: Path) -> None:
         """Open *root*: build its bundle and index it. No-op if open."""
@@ -83,19 +104,30 @@ class WorkspaceSet:
         self._by_depth = sorted(self._bundles, key=lambda p: len(p.parts), reverse=True)
         self._last = None
         _log.info("workspace added: %s (%d open)", root, len(self._bundles))
-        for a in bundle:
-            # A removed-while-indexing folder stops indexing early.
-            if self._bundles.get(root) is not bundle:
-                return
-            await a.index(root)
+        try:
+            for a in bundle:
+                # A removed-while-indexing folder stops indexing early.
+                if self._bundles.get(root) is not bundle:
+                    return
+                await a.index(root)
+        finally:
+            # Ready even when an index raised: held diagnostics then go
+            # out filtered by whatever did index, rather than never.
+            if self._bundles.get(root) is bundle:
+                self._ready.add(root)
+                _log.info("workspace ready: %s", root)
+                self._notify()
 
     def remove(self, root: Path) -> None:
         """Close *root* and let its indexes go."""
         if self._bundles.pop(root, None) is None:
             return
+        self._ready.discard(root)
         self._by_depth = [p for p in self._by_depth if p != root]
         self._last = None
         _log.info("workspace removed: %s (%d open)", root, len(self._bundles))
+        # Its files now route to another folder, which may be ready.
+        self._notify()
 
     def root_for_path(self, path: Path) -> Path | None:
         for root in self._by_depth:
@@ -103,19 +135,32 @@ class WorkspaceSet:
                 return root
         return None
 
-    def bundle_for(self, uri: str) -> list[Analyzer] | None:
+    def _root_for_uri(self, uri: str) -> Path | None:
+        """The folder whose bundle serves *uri*: the deepest folder holding
+        it, else the primary one; ``None`` with no folder open."""
         if self._last is not None and self._last[0] == uri:
             return self._last[1]
-        bundle = None
+        root = None
         path = _file_uri_to_path(uri)
         if path is not None:
             root = self.root_for_path(path)
-            if root is not None:
-                bundle = self._bundles[root]
-        if bundle is None:
-            bundle = next(iter(self._bundles.values()), None)
-        self._last = (uri, bundle)
-        return bundle
+        if root is None:
+            root = next(iter(self._bundles), None)
+        self._last = (uri, root)
+        return root
+
+    def bundle_for(self, uri: str) -> list[Analyzer] | None:
+        root = self._root_for_uri(uri)
+        return self._bundles[root] if root is not None else None
+
+    def is_ready(self, uri: str) -> bool:
+        """Has the bundle serving *uri* finished indexing? With no folder
+        open there is nothing to wait for."""
+        root = self._root_for_uri(uri)
+        return root is None or root in self._ready
+
+    def all_ready(self) -> bool:
+        return all(root in self._ready for root in self._bundles)
 
     def routed(self, classes: Sequence[type]) -> list["RoutedAnalyzer"]:
         """One router per bundle slot; *classes* is the factory's class order."""

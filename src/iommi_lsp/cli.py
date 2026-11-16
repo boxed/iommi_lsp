@@ -239,7 +239,12 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
     )
     analyzers = workspaces.routed(ANALYZER_CLASSES)
 
-    interceptor = DiagnosticInterceptor(analyzers=analyzers)
+    interceptor = DiagnosticInterceptor(
+        analyzers=analyzers,
+        is_ready=workspaces.is_ready,
+        all_ready=workspaces.all_ready,
+    )
+    workspaces.on_readiness_change(interceptor.release_ready)
     matchmaker = CompletionMatchmaker(
         analyzers=analyzers, text_provider=documents.get,
     )
@@ -272,6 +277,7 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
     backend_env = _backend_env(root, os.environ)
 
     def attach_writer(writer) -> None:
+        interceptor.attach_editor_writer(writer)
         matchmaker.attach_editor_writer(writer)
         definition_router.attach_editor_writer(writer)
         code_action_router.attach_editor_writer(writer)

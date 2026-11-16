@@ -338,3 +338,158 @@ async def test_the_proxy_hands_each_folder_its_venv_end_to_end(tmp_path):
         if proc.returncode is None:
             proc.kill()
             await proc.wait()
+
+
+# -- diagnostics wait for the folder's index ---------------------------------
+#
+# Indexing runs off the event loop, so ty publishes for a file before its
+# folder is indexed. Filtered against the empty index, every Django false
+# positive (``Class `Project` has no attribute `objects```) got through, and
+# ty never published again until the file changed.
+
+
+class _GatedIndex:
+    """Recognises its false positive only once indexed; indexing waits on
+    *gate*, so a test can publish while the folder is mid-index."""
+
+    name = "gated"
+
+    def __init__(self, root: Path, gate: asyncio.Event) -> None:
+        self.gate = gate
+        self.indexed = False
+
+    async def index(self, workspace_root: Path) -> None:
+        await self.gate.wait()
+        self.indexed = True
+
+    async def on_file_changed(self, uri: str) -> None:
+        pass
+
+    def is_false_positive(self, uri: str, diagnostic: dict) -> bool:
+        return self.indexed and diagnostic["message"] == "noise"
+
+
+class _Writer:
+    def __init__(self) -> None:
+        self.frames: list[dict] = []
+
+    def write(self, data: bytes) -> None:
+        self.frames.append(json.loads(data.split(b"\r\n\r\n", 1)[1]))
+
+
+def _gated(gate: asyncio.Event) -> tuple[WorkspaceSet, DiagnosticInterceptor, _Writer]:
+    ws = WorkspaceSet(lambda root: [_GatedIndex(root, gate)])
+    interceptor = DiagnosticInterceptor(
+        analyzers=ws.routed([_GatedIndex]),
+        is_ready=ws.is_ready, all_ready=ws.all_ready,
+    )
+    ws.on_readiness_change(interceptor.release_ready)
+    writer = _Writer()
+    interceptor.attach_editor_writer(writer)  # type: ignore[arg-type]
+    return ws, interceptor, writer
+
+
+def _publish(uri: str, *messages: str) -> bytes:
+    return json.dumps({
+        "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+        "params": {"uri": uri, "diagnostics": [
+            {"range": {"start": {"line": 0, "character": 0},
+                       "end": {"line": 0, "character": 1}},
+             "message": m} for m in messages
+        ]},
+    }).encode()
+
+
+async def _settle() -> None:
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+async def test_a_publish_during_indexing_is_held_then_filtered(tmp_path):
+    gate = asyncio.Event()
+    ws, interceptor, writer = _gated(gate)
+    uri = (tmp_path / "x.py").as_uri()
+    task = asyncio.create_task(ws.add(tmp_path))
+    await _settle()
+    assert not ws.is_ready(uri)
+
+    assert await interceptor(_publish(uri, "noise", "older")) is None
+    # A newer publish for the same file supersedes the held one.
+    assert await interceptor(_publish(uri, "noise", "real")) is None
+    assert writer.frames == []
+
+    gate.set()
+    await task
+    assert ws.is_ready(uri)
+    (frame,) = writer.frames
+    assert [d["message"] for d in frame["params"]["diagnostics"]] == ["real"]
+
+    # Once ready, publishes go straight through the filter again.
+    out = json.loads(await interceptor(_publish(uri, "noise", "later")))
+    assert [d["message"] for d in out["params"]["diagnostics"]] == ["later"]
+
+
+async def test_a_pull_response_during_indexing_is_held_then_filtered(tmp_path):
+    gate = asyncio.Event()
+    ws, interceptor, writer = _gated(gate)
+    uri = (tmp_path / "x.py").as_uri()
+    task = asyncio.create_task(ws.add(tmp_path))
+    await _settle()
+
+    await interceptor.on_request(json.dumps({
+        "jsonrpc": "2.0", "id": 7, "method": "textDocument/diagnostic",
+        "params": {"textDocument": {"uri": uri}},
+    }).encode())
+    response = json.dumps({"jsonrpc": "2.0", "id": 7, "result": {
+        "kind": "full", "items": [{"message": "noise"}, {"message": "real"}],
+    }}).encode()
+    assert await interceptor(response) is None
+
+    gate.set()
+    await task
+    (frame,) = writer.frames
+    assert frame["id"] == 7
+    assert [d["message"] for d in frame["result"]["items"]] == ["real"]
+
+
+async def test_only_the_indexing_folders_files_wait(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    gate = asyncio.Event()
+    ws, interceptor, writer = _gated(gate)
+    ready_a = asyncio.Event()
+    ready_a.set()
+    # Folder a indexes at once; b waits on the gate.
+    ws._factory = lambda root: [_GatedIndex(root, ready_a if root == a else gate)]
+    await ws.add(a)
+    task = asyncio.create_task(ws.add(b))
+    await _settle()
+
+    out = json.loads(await interceptor(_publish((a / "x.py").as_uri(), "noise", "real")))
+    assert [d["message"] for d in out["params"]["diagnostics"]] == ["real"]
+    assert await interceptor(_publish((b / "y.py").as_uri(), "noise")) is None
+
+    gate.set()
+    await task
+    (frame,) = writer.frames
+    assert frame["params"]["diagnostics"] == []
+
+
+async def test_removing_an_indexing_folder_releases_its_held_files(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    gate = asyncio.Event()
+    ws, interceptor, writer = _gated(gate)
+    ready_a = asyncio.Event()
+    ready_a.set()
+    ws._factory = lambda root: [_GatedIndex(root, ready_a if root == a else gate)]
+    await ws.add(a)
+    task = asyncio.create_task(ws.add(b))
+    await _settle()
+    assert await interceptor(_publish((b / "y.py").as_uri(), "noise", "real")) is None
+
+    # b's file now routes to a, which is ready.
+    ws.remove(b)
+    (frame,) = writer.frames
+    assert [d["message"] for d in frame["params"]["diagnostics"]] == ["real"]
+    gate.set()
+    await task
+    assert len(writer.frames) == 1

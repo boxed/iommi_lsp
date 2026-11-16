@@ -138,14 +138,62 @@ class DiagnosticInterceptor:
       in the originating request — so :meth:`on_request` records request
       id→URI on the editor→ty side and :meth:`__call__` consults it when the
       matching response comes back.
+
+    Diagnostics for a file whose workspace is still indexing are *held*:
+    filtering them against a half-built index would let every Django false
+    positive through, and ty doesn't publish again until the file changes,
+    so they'd stick. :meth:`release_ready` (a readiness listener) filters
+    and sends them once *is_ready* says the index is there. Holding needs
+    the editor writer; without one, frames pass through as before.
     """
 
-    def __init__(self, analyzers: Sequence[Analyzer] = ()) -> None:
+    def __init__(
+        self,
+        analyzers: Sequence[Analyzer] = (),
+        *,
+        is_ready: Callable[[str], bool] | None = None,
+        all_ready: Callable[[], bool] | None = None,
+    ) -> None:
         self.analyzers: list[Analyzer] = list(analyzers)
         # Pull-diagnostics request id → document URI (single-document pulls).
         self._pending_pull: dict[Any, str] = {}
         # Workspace pull request ids (reports carry their own per-URI).
         self._pending_workspace_pull: set[Any] = set()
+        self._is_ready = is_ready or (lambda uri: True)
+        self._all_ready = all_ready or (lambda: True)
+        self._editor_writer: asyncio.StreamWriter | None = None
+        # URI → latest held publishDiagnostics payload (a newer publish
+        # supersedes an older one).
+        self._held_publish: dict[str, dict] = {}
+        # Held pull responses: (URI, or None for a workspace pull, payload).
+        self._held_pulls: list[tuple[str | None, dict]] = []
+
+    def attach_editor_writer(self, writer: asyncio.StreamWriter) -> None:
+        self._editor_writer = writer
+
+    def _can_hold(self) -> bool:
+        return self._editor_writer is not None
+
+    def release_ready(self) -> None:
+        """Filter and send every held frame whose workspace is now ready."""
+        if self._editor_writer is None:
+            return
+        out: list[bytes] = []
+        for uri, payload in list(self._held_publish.items()):
+            if self._is_ready(uri):
+                del self._held_publish[uri]
+                out.append(self._handle_publish(payload, None))
+        still_held: list[tuple[str | None, dict]] = []
+        for uri, payload in self._held_pulls:
+            if uri is None and self._all_ready():
+                out.append(self._handle_workspace_pull_response(payload, None))
+            elif uri is not None and self._is_ready(uri):
+                out.append(self._handle_pull_response(payload, None, uri))
+            else:
+                still_held.append((uri, payload))
+        self._held_pulls = still_held
+        for body in out:
+            self._editor_writer.write(jsonrpc.encode_message(body))
 
     async def on_request(self, body: bytes) -> bytes | None:
         """Editor→ty hook: remember pull-diagnostic requests so the matching
@@ -190,6 +238,11 @@ class DiagnosticInterceptor:
 
         method = payload.get("method")
         if method == PUBLISH_DIAGNOSTICS:
+            uri = (payload.get("params") or {}).get("uri", "")
+            if self._can_hold() and not self._is_ready(uri):
+                self._held_publish[uri] = payload
+                _log.debug("holding publishDiagnostics uri=%s until indexed", uri)
+                return None
             return self._handle_publish(payload, body)
 
         # Responses carry an id and no method. Match against the pull-request
@@ -198,12 +251,22 @@ class DiagnosticInterceptor:
         msg_id = payload.get("id")
         if method is None and msg_id is not None:
             if msg_id in self._pending_pull:
-                return self._handle_pull_response(payload, body, msg_id)
+                uri = self._pending_pull.pop(msg_id)
+                if self._can_hold() and not self._is_ready(uri):
+                    self._held_pulls.append((uri, payload))
+                    return None
+                return self._handle_pull_response(payload, body, uri)
             if msg_id in self._pending_workspace_pull:
-                return self._handle_workspace_pull_response(payload, body, msg_id)
+                self._pending_workspace_pull.discard(msg_id)
+                if self._can_hold() and not self._all_ready():
+                    self._held_pulls.append((None, payload))
+                    return None
+                return self._handle_workspace_pull_response(payload, body)
         return body
 
-    def _handle_publish(self, payload: dict, body: bytes) -> bytes | None:
+    def _handle_publish(self, payload: dict, body: bytes | None) -> bytes:
+        """Filter a publish. *body* is the original frame, returned as-is
+        when nothing changed; ``None`` (a held frame) always re-encodes."""
         params = payload.get("params") or {}
         uri = params.get("uri", "")
         diagnostics: list[Diagnostic] = list(params.get("diagnostics") or [])
@@ -220,32 +283,31 @@ class DiagnosticInterceptor:
             len(added),
         )
 
-        if len(kept) == len(diagnostics) and not added:
+        if len(kept) == len(diagnostics) and not added and body is not None:
             return body
 
         params["diagnostics"] = kept + added
         payload["params"] = params
-        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        return _encode(payload)
 
-    def _handle_pull_response(self, payload: dict, body: bytes, msg_id: Any) -> bytes | None:
-        uri = self._pending_pull.pop(msg_id, None)
+    def _handle_pull_response(self, payload: dict, body: bytes | None, uri: str) -> bytes:
         result = payload.get("result")
         # Error responses / cancellations have no ``result`` dict — the id is
         # resolved, nothing to filter.
-        if uri is None or not isinstance(result, dict):
+        if not isinstance(result, dict):
+            return body if body is not None else _encode(payload)
+        if not self._filter_full_report(uri, result) and body is not None:
             return body
-        if not self._filter_full_report(uri, result):
-            return body
-        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        return _encode(payload)
 
-    def _handle_workspace_pull_response(self, payload: dict, body: bytes, msg_id: Any) -> bytes | None:
-        self._pending_workspace_pull.discard(msg_id)
+    def _handle_workspace_pull_response(self, payload: dict, body: bytes | None) -> bytes:
+        unchanged = body if body is not None else _encode(payload)
         result = payload.get("result")
         if not isinstance(result, dict):
-            return body
+            return unchanged
         items = result.get("items")
         if not isinstance(items, list):
-            return body
+            return unchanged
         changed = False
         for report in items:
             # Each WorkspaceDocumentDiagnosticReport carries its own URI.
@@ -255,8 +317,8 @@ class DiagnosticInterceptor:
             if isinstance(rep_uri, str) and self._filter_full_report(rep_uri, report):
                 changed = True
         if not changed:
-            return body
-        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            return unchanged
+        return _encode(payload)
 
     def _filter_full_report(self, uri: str, report: dict) -> bool:
         """Filter a (Related)FullDocumentDiagnosticReport in place. Returns
@@ -304,6 +366,10 @@ class DiagnosticInterceptor:
             except Exception:
                 _log.exception("analyzer %s additional_diagnostics crashed", getattr(a, "name", a))
         return out
+
+
+def _encode(payload: dict) -> bytes:
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
 def _count_items(result: Any) -> int:
