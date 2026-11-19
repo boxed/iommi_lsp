@@ -1609,6 +1609,28 @@ def test_function_local_import_of_a_same_named_class(workspace: Path):
     assert diags == []
 
 
+def test_same_named_class_with_a_base_from_its_own_module(workspace: Path):
+    """``class Table(Base)`` where ``Base`` is defined beside it: the base
+    resolves to a bare name, which names no module to look in. Reading it
+    as the module ``""`` raised (``PosixPath('.') has an empty name``) and
+    cost the file every iommi diagnostic."""
+    (workspace / "app").mkdir(exist_ok=True)
+    (workspace / "app" / "__init__.py").write_text("")
+    (workspace / "app" / "kinds.py").write_text(
+        "class Base:\n"
+        "    pass\n"
+        "\n"
+        "class Table(Base):\n"
+        "    pass\n"
+    )
+    diags = _diagnose(workspace, """
+        from app.kinds import Table
+
+        t = Table(name='x')
+    """)
+    assert diags == []
+
+
 def test_project_wrapper_subclass_is_still_validated(workspace: Path):
     """``from app.iommi import Table`` — a project's own subclass counts."""
     (workspace / "app").mkdir(exist_ok=True)

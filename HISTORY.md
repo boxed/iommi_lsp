@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A class whose base is defined in its own module no longer crashes the iommi diagnostics for the file that uses it (`PosixPath('.') has an empty name`)
 - Attribute access, assignment and arithmetic *through* a Django field no longer warn (the descriptor is invisible to ty)
 - "Code is unreachable" no longer cascades from a guard that narrows on a model field
 - Unused-name hints dropped on pytest fixtures/test modules, stub bodies, `*args`/`**kwargs`, and names bound by sequence unpacking

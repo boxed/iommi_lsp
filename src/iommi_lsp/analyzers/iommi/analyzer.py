@@ -807,6 +807,11 @@ class IommiAnalyzer:
         self, module: str, name: str,
     ) -> tuple[ast.ClassDef | None, dict[str, str]]:
         """Find ``class <name>`` in a workspace *module*, with its imports."""
+        if not module:
+            # A bare name (a base defined beside its subclass) has no
+            # module to read; ``Path("")`` is ``.``, which has no name to
+            # put a suffix on.
+            return None, {}
         rel = Path(*module.split("."))
         for candidate in (
             self.workspace_root / rel.with_suffix(".py"),
