@@ -385,3 +385,122 @@ def test_index_is_pure_no_imports(monkeypatch):
             sys.modules.pop("django", None)
         else:
             sys.modules["django"] = saved
+
+
+# -- scrape cost ------------------------------------------------------------
+
+
+def test_class_defs_matches_ast_walk_order():
+    """``_class_defs`` descends statements only, and must find the classes
+    ``ast.walk`` finds, in its order — nested in functions, branches, loops,
+    ``try`` arms, ``with`` and ``match`` — since two classes of one name in
+    a file resolve by position."""
+    import ast
+
+    from iommi_lsp.analyzers.django.index import _class_defs
+
+    tree = ast.parse(
+        "class Top:\n"
+        "    class Meta:\n"
+        "        pass\n"
+        "    def method(self):\n"
+        "        class InMethod: pass\n"
+        "        return [lambda: 0 for _ in ()]\n"
+        "if True:\n"
+        "    class InIf: pass\n"
+        "else:\n"
+        "    class InElse: pass\n"
+        "for _ in ():\n"
+        "    class InFor: pass\n"
+        "else:\n"
+        "    class InForElse: pass\n"
+        "while False:\n"
+        "    class InWhile: pass\n"
+        "try:\n"
+        "    class InTry: pass\n"
+        "except ValueError:\n"
+        "    class InExcept: pass\n"
+        "else:\n"
+        "    class InTryElse: pass\n"
+        "finally:\n"
+        "    class InFinally: pass\n"
+        "with open('x') as f:\n"
+        "    class InWith: pass\n"
+        "match 1:\n"
+        "    case 1:\n"
+        "        class InCase: pass\n"
+        "async def coro():\n"
+        "    async with a:\n"
+        "        class InAsyncWith: pass\n"
+        "    async for _ in a:\n"
+        "        class InAsyncFor: pass\n"
+        "class Last(Top):\n"
+        "    class Meta:\n"
+        "        pass\n"
+    )
+    walked = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+    assert len(walked) == 18
+    assert [id(n) for n in _class_defs(tree)] == [id(n) for n in walked]
+
+
+def test_a_file_without_a_class_statement_is_not_parsed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """The index reads classes; a file with none (most tests, scripts and
+    helpers) contributes nothing, and parsing is what indexing costs."""
+    import ast
+
+    from iommi_lsp.analyzers.django import index as index_module
+
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "app" / "helpers.py").write_text(
+        '"""Not a class statement: class of 2020."""\n'
+        "def classify(x):\n"
+        "    return x\n"
+    )
+    (tmp_path / "app" / "models.py").write_text(
+        "from django.db import models\n"
+        "\n"
+        "if True:\n"
+        "\tclass Book(models.Model):\n"
+        "\t\ttitle = models.CharField(max_length=10)\n"
+    )
+    parsed: list[str] = []
+    real_parse = ast.parse
+
+    def recording(source, filename="<unknown>", *args, **kwargs):
+        parsed.append(Path(filename).name)
+        return real_parse(source, filename, *args, **kwargs)
+    monkeypatch.setattr(index_module.ast, "parse", recording)
+
+    scrapes = index_module.collect_scrapes(tmp_path)
+    assert "helpers.py" not in parsed and "__init__.py" not in parsed
+    assert "models.py" in parsed
+    helpers = scrapes[(tmp_path / "app" / "helpers.py").resolve()]
+    assert helpers.classes == [] and helpers.imports == {}
+    index = index_module.assemble_index(tmp_path, scrapes)
+    assert "app.models.Book" in index.models
+
+
+def test_migrations_are_not_scraped(tmp_path: Path):
+    """A migration declares ``class Migration``, never a model the project
+    queries — and there are more of them than of any other file."""
+    from iommi_lsp.analyzers.django.index import collect_scrapes
+
+    app = tmp_path / "app"
+    (app / "migrations").mkdir(parents=True)
+    (app / "__init__.py").write_text("")
+    (app / "models.py").write_text(
+        "from django.db import models\n"
+        "class Book(models.Model):\n"
+        "    title = models.CharField(max_length=10)\n"
+    )
+    (app / "migrations" / "__init__.py").write_text("")
+    (app / "migrations" / "0001_initial.py").write_text(
+        "from django.db import migrations\n"
+        "class Migration(migrations.Migration):\n"
+        "    operations = []\n"
+    )
+    names = {p.name for p in collect_scrapes(tmp_path)}
+    assert names == {"__init__.py", "models.py"}

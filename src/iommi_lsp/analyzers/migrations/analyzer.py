@@ -23,17 +23,11 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from ... import log
+from ...walk import walk_workspace
 from ..base import CompletionResult, Diagnostic
 
 
 _log = log.get("migrations.analyzer")
-
-
-_SKIP_DIRS = frozenset({
-    ".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
-    "__pycache__", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
-    "build", "dist", "site-packages",
-})
 
 
 def discover_migrations(workspace_root: Path) -> dict[str, list[str]]:
@@ -44,11 +38,7 @@ def discover_migrations(workspace_root: Path) -> dict[str, list[str]]:
     """
     out: dict[str, list[str]] = defaultdict(list)
     root = workspace_root.resolve()
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in _SKIP_DIRS and not d.startswith(".")
-        ]
+    for dirpath, dirnames, filenames in walk_workspace(root):
         if os.path.basename(dirpath) != "migrations":
             continue
         # Skip non-package migration folders (must contain __init__.py).

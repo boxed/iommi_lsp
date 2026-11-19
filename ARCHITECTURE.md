@@ -56,6 +56,29 @@ Synthesised stubs cover `Table`, `Form`, `Query`, and `Page` so the
 above all works before `iommi_lsp graph build` ever succeeds; the
 project's own iommi subclasses light up once a real graph is available.
 
+## What gets indexed
+
+Every analyzer that scans the workspace walks it through
+`iommi_lsp.walk.walk_workspace`: an `os.walk` without VCS / tool /
+virtualenv directories, dot-directories, and the directories git ignores
+(one `git ls-files --others --ignored --directory` per indexing round;
+skipped outside a repository). Ignored *files* in tracked directories stay —
+a `local_settings.py` is still the project's.
+
+Pruning ignored directories is what keeps a workspace from being indexed
+several times over. On the project this was measured on, two ignored copies
+of the tree under `tmp/` were 6,316 of the 9,649 `.py` files found: the
+Django index took 16 s, two thirds of it parsing them, and then listed 610
+models where the project has 210.
+
+The Django index is the one scan that parses, so it also reads as little as
+it can: migrations are skipped (a `Migration` is never a model), a file with
+no `class` statement isn't parsed at all (its imports are only ever read to
+resolve its own classes' bases), and classes are found by descending
+statements rather than `ast.walk`ing every expression. Together: 16.2 s →
+2.1 s on that workspace, the remainder being `ast.parse` of the 686 files
+that do hold classes.
+
 ## How the Django filter works
 
 For each `unresolved-attribute` diagnostic from `ty`:

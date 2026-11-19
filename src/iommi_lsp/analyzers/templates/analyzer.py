@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse
 
 from ... import log
+from ...walk import walk_workspace
 from ..base import CompletionResult, Diagnostic
 
 if TYPE_CHECKING:
@@ -44,13 +45,6 @@ if TYPE_CHECKING:
 
 
 _log = log.get("templates.analyzer")
-
-
-_SKIP_DIRS = frozenset({
-    ".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
-    "__pycache__", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
-    "build", "dist", "site-packages",
-})
 
 
 _TEMPLATE_EXTENSIONS = frozenset({
@@ -833,11 +827,7 @@ def discover_templatetag_registrations(
     tags: dict[str, set[str]] = {}
     root = workspace_root.resolve()
     pkg_dirs: list[Path] = []
-    for dirpath, dirnames, _filenames in os.walk(root):
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in _SKIP_DIRS and not d.startswith(".")
-        ]
+    for dirpath, dirnames, _filenames in walk_workspace(root):
         if "templatetags" in dirnames:
             pkg_dirs.append(Path(dirpath) / "templatetags")
     for pkg in pkg_dirs:
@@ -969,11 +959,7 @@ def discover_templatetags(workspace_root: Path) -> set[str]:
     out: set[str] = set()
     root = workspace_root.resolve()
     pkg_dirs: list[Path] = []
-    for dirpath, dirnames, _filenames in os.walk(root):
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in _SKIP_DIRS and not d.startswith(".")
-        ]
+    for dirpath, dirnames, _filenames in walk_workspace(root):
         if "templatetags" in dirnames:
             pkg_dirs.append(Path(dirpath) / "templatetags")
             # Don't prune the dir from further recursion — rare, but a
@@ -1005,11 +991,7 @@ def _discover_relative_files(workspace_root: Path, target_dirname: str) -> dict[
     out: dict[str, Path] = {}
     root = workspace_root.resolve()
     asset_dirs: list[Path] = []
-    for dirpath, dirnames, _filenames in os.walk(root):
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in _SKIP_DIRS and not d.startswith(".")
-        ]
+    for dirpath, dirnames, _filenames in walk_workspace(root):
         if target_dirname in dirnames:
             asset_dirs.append(Path(dirpath) / target_dirname)
             dirnames.remove(target_dirname)

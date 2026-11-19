@@ -28,24 +28,17 @@ require a small string-token scanner of its own.
 from __future__ import annotations
 
 import ast
-import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from ... import log
+from ...walk import walk_workspace
 from ..base import CompletionResult, Diagnostic
 
 
 _log = log.get("urls.analyzer")
-
-
-_SKIP_DIRS = frozenset({
-    ".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
-    "__pycache__", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
-    "build", "dist", "site-packages",
-})
 
 
 # Callable names whose first positional/``viewname=`` argument is a URL name.
@@ -243,11 +236,7 @@ def discover_urls(workspace_root: Path) -> list[Path]:
     """Return every ``urls.py`` under *workspace_root*."""
     out: list[Path] = []
     root = workspace_root.resolve()
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in _SKIP_DIRS and not d.startswith(".")
-        ]
+    for dirpath, dirnames, filenames in walk_workspace(root):
         if "urls.py" in filenames:
             out.append(Path(dirpath) / "urls.py")
     return out

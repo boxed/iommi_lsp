@@ -29,13 +29,13 @@ naturally ignores irrelevant string positions.
 from __future__ import annotations
 
 import ast
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse
 
 from ... import log
+from ...walk import walk_workspace
 from ..base import CompletionResult, Diagnostic
 
 
@@ -44,13 +44,6 @@ if TYPE_CHECKING:
 
 
 _log = log.get("settings.analyzer")
-
-
-_SKIP_DIRS = frozenset({
-    ".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
-    "__pycache__", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
-    "build", "dist", "site-packages",
-})
 
 
 # ---------------------------------------------------------------------------
@@ -371,11 +364,7 @@ def discover_workspace_apps(workspace_root: Path) -> set[str]:
     """
     out: set[str] = set()
     root = workspace_root.resolve()
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in _SKIP_DIRS and not d.startswith(".")
-        ]
+    for dirpath, dirnames, filenames in walk_workspace(root):
         if "apps.py" not in filenames:
             continue
         app_dir = Path(dirpath)
@@ -401,11 +390,7 @@ def discover_wsgi_applications(workspace_root: Path) -> set[str]:
     """
     out: set[str] = set()
     root = workspace_root.resolve()
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in _SKIP_DIRS and not d.startswith(".")
-        ]
+    for dirpath, dirnames, filenames in walk_workspace(root):
         if "wsgi.py" not in filenames:
             continue
         wsgi_path = Path(dirpath) / "wsgi.py"

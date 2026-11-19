@@ -170,7 +170,7 @@ class DjangoAnalyzer:
 
         self.workspace_root = workspace_root
         self.config = load_config(workspace_root)
-        # The full-workspace parse is the one slow step (~5 s on a large
+        # The full-workspace parse is the one slow step (~2 s on a large
         # project) and touches nothing shared, so it runs off the event
         # loop: the proxy keeps forwarding frames — for this workspace and
         # any other one this process serves — while it does.

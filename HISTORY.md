@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Startup on a large workspace is several times faster (16 s → 2 s to index one real project): directories git ignores are no longer indexed, and the Django index skips migrations, doesn't parse files without a `class` statement, and looks for classes in statements only
+- Git-ignored directories (scratch copies of the project, build output) no longer contribute duplicate models, migrations, templates, URL names or apps
 - A class whose base is defined in its own module no longer crashes the iommi diagnostics for the file that uses it (`PosixPath('.') has an empty name`)
 - Attribute access, assignment and arithmetic *through* a Django field no longer warn (the descriptor is invisible to ty)
 - "Code is unreachable" no longer cascades from a guard that narrows on a model field

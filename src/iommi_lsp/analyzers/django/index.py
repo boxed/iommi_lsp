@@ -20,12 +20,13 @@ What we extract:
 from __future__ import annotations
 
 import ast
-import os
-from collections import defaultdict
+import re
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ... import log
+from ...walk import walk_workspace
 from .builtins import BUILTIN_MODULES
 from .magic import DATE_FIELD_NAMES, FK_LIKE_FIELD_NAMES, RELATION_FIELD_NAMES
 
@@ -391,6 +392,40 @@ def _build_import_map(
     return imports
 
 
+# A ``class`` statement always opens its line: a compound statement can't
+# follow ``;`` or another statement's ``:``. So a file without a match has
+# no class, and one with a match only *may* (a docstring can hold the word).
+_CLASS_STATEMENT = re.compile(r"^[ \t\f]*class[ \t\\]", re.MULTILINE)
+
+# The fields through which one statement holds others. A class can only sit
+# in one of these, never inside an expression.
+_STATEMENT_FIELDS = ("body", "handlers", "orelse", "finalbody", "cases")
+
+
+def _class_defs(tree: ast.Module) -> list[ast.ClassDef]:
+    """Every ``ClassDef`` in *tree*, in ``ast.walk``'s order.
+
+    ``ast.walk`` visits every node, and most of a file's nodes are
+    expressions no class can be in: on a real workspace it took a third of
+    the whole scrape. This descends statements only — the same breadth-first
+    order, a tenth of the time.
+    """
+    found: list[ast.ClassDef] = []
+    todo: deque[ast.AST] = deque([tree])
+    while todo:
+        node = todo.popleft()
+        if isinstance(node, ast.ClassDef):
+            found.append(node)
+        for name in _STATEMENT_FIELDS:
+            children = getattr(node, name, None)
+            # ``Lambda.body`` / ``IfExp.orelse`` are single expressions, but
+            # only statements are ever queued, so a list here is statements
+            # (or the handlers / cases that hold them).
+            if isinstance(children, list):
+                todo.extend(children)
+    return found
+
+
 def _scrape_file(
     path: Path, module: str, *, source: str | None = None
 ) -> _FileScrape | None:
@@ -400,6 +435,11 @@ def _scrape_file(
         except (OSError, UnicodeDecodeError) as e:
             _log.debug("skipping %s: %s", path, e)
             return None
+    # The index is built from classes, and a file's imports are read only
+    # to resolve its classes' bases. A third of a real workspace's files
+    # (tests, scripts, helpers) hold none, and parsing is what costs.
+    if _CLASS_STATEMENT.search(source) is None:
+        return _FileScrape(module=module, file_path=path, classes=[], imports={})
     try:
         tree = ast.parse(source, filename=str(path))
     except SyntaxError as e:
@@ -411,9 +451,7 @@ def _scrape_file(
     )
 
     classes: list[_RawClass] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
-            continue
+    for node in _class_defs(tree):
         base_strs: list[str] = []
         for base in node.bases:
             flat = _flatten_attribute(base)
@@ -745,13 +783,6 @@ def _populate_fields(
 # ---------------------------------------------------------------------------
 
 
-_DEFAULT_SKIP = frozenset({
-    ".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
-    "__pycache__", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
-    "build", "dist", "site-packages",
-})
-
-
 # Synthetic anchor for builtin-stub file paths. Nothing reads these paths
 # off disk; they exist so each builtin scrape has a unique, hashable key.
 _BUILTIN_ROOT = Path("/__iommi_lsp_builtins__")
@@ -788,8 +819,11 @@ def _build_builtin_scrapes() -> dict[Path, _FileScrape]:
 
 def _iter_python_files(root: Path) -> list[Path]:
     found: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _DEFAULT_SKIP and not d.startswith(".")]
+    for dirpath, dirnames, filenames in walk_workspace(root):
+        # A migration file declares a ``Migration``, never a model, and a
+        # long-lived project has more of them than of anything else.
+        if "migrations" in dirnames:
+            dirnames.remove("migrations")
         for name in filenames:
             if name.endswith(".py"):
                 found.append(Path(dirpath) / name)
